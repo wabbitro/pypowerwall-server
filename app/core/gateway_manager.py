@@ -254,13 +254,15 @@ class GatewayManager:
         sleep-after-poll approach the effective interval was poll_duration + sleep,
         causing drift (e.g. ~8-9s actual interval when PW_CACHE_EXPIRE=5).
 
-        The loop records the wall-clock time at the start of each cycle and only
-        sleeps for the *remaining* time after all gateways have been polled, so
-        the next cycle starts as close to the configured interval as possible.
+        The loop records the monotonic clock time (via ``loop.time()``) at the
+        start of each cycle and only sleeps for the *remaining* time after all
+        gateways have been polled, so the next cycle starts as close to the
+        configured interval as possible.
         """
         while True:
             try:
-                loop_start = asyncio.get_event_loop().time()
+                loop = asyncio.get_running_loop()
+                loop_start = loop.time()
 
                 # Poll all gateways concurrently
                 tasks = [
@@ -270,7 +272,7 @@ class GatewayManager:
                 await asyncio.gather(*tasks, return_exceptions=True)
 
                 # Sleep only the remaining time to maintain fixed interval
-                elapsed = asyncio.get_event_loop().time() - loop_start
+                elapsed = loop.time() - loop_start
                 sleep_time = max(0, self._poll_interval - elapsed)
                 await asyncio.sleep(sleep_time)
             except asyncio.CancelledError:
