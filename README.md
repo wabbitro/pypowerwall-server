@@ -68,7 +68,7 @@ docker run -d \
   -p 8675:8675 \
   -v ~/.pypowerwall:/auth \
   -e PW_EMAIL="your@email.com" \
-  -e PW_AUTHPATH=/auth \
+  -e PW_AUTH_PATH=/auth \
   jasonacox/pypowerwall-server
 
 # One-time setup (runs auth flow to generate token files)
@@ -153,7 +153,7 @@ PW_TIMEZONE=America/Los_Angeles
 PW_HOST=192.168.91.1
 PW_GW_PWD=your_gateway_password          # For TEDAPI data reads
 PW_EMAIL=your-tesla-account@email.com
-PW_AUTHPATH=/path/to/auth/files            # Directory with .pypowerwall.auth/.site
+PW_AUTH_PATH=/path/to/auth/files            # Directory with .pypowerwall.auth/.site
 PW_TIMEZONE=America/Los_Angeles
 ```
 
@@ -459,7 +459,7 @@ PW_GW_PWD=gateway_password
 PW_HOST=192.168.91.1
 PW_GW_PWD=gateway_password
 PW_EMAIL=tesla@email.com
-PW_AUTHPATH=/path/to/auth  # Directory with .pypowerwall.auth/.site files
+PW_AUTH_PATH=/path/to/auth  # Directory with .pypowerwall.auth/.site files
 ```
 
 ### Async + Sync Library Integration
