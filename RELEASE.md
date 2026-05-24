@@ -2,6 +2,15 @@
 
 ## Version History
 
+### [0.3.2] - 2026-05-24
+
+**Fixed:**
+- **Battery percentage now consistently Tesla-scaled** across all surfaces — API, MQTT, Home Assistant discovery, aggregate endpoints, WebSocket, and CSV outputs now publish both raw SOE and Tesla-app-scaled battery percentage. Previously, MQTT/HA consumers saw the raw SOE value (~4% higher than Tesla app) while the web dashboard happened to rescale client-side (#42). Thanks @sphen13 for the thorough diagnostics!
+- **`PW_AUTH_PATH` env var** — fixed mismatched env var name (`PW_AUTHPATH` → `PW_AUTH_PATH`) in CLI argument processing so the documented variable name works everywhere (#41).
+
+**Added:**
+- Regression tests covering raw vs. scaled SOE across API, aggregate, MQTT publisher, and HA discovery surfaces.
+
 ### [0.3.1] - 2026-05-11
 
 **Fixed:**
