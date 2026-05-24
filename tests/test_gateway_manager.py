@@ -3,6 +3,7 @@ import asyncio
 import pytest
 from unittest.mock import Mock
 from app.core.gateway_manager import gateway_manager
+from app.core.scaling import raw_to_tesla_battery_percent
 
 
 def test_get_gateway(connected_gateway):
@@ -66,7 +67,8 @@ async def test_polling_updates_gateway_data(mock_gateway_manager, mock_pypowerwa
     status = mock_gateway_manager.get_gateway("poll-test")
     assert status.online is True
     assert status.data.aggregates is not None
-    assert status.data.soe == 85.5
+    assert status.data.soe_raw == 85.5
+    assert status.data.soe == pytest.approx(raw_to_tesla_battery_percent(85.5))
 
 
 @pytest.mark.asyncio
@@ -427,4 +429,3 @@ async def test_initialize_cloud_control_exception_is_handled(monkeypatch):
     assert gm._cloud_control is None
 
     await gm.shutdown()
-

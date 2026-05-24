@@ -4,6 +4,7 @@ from unittest.mock import Mock
 from fastapi.testclient import TestClient
 from app.main import app
 from app.core.gateway_manager import gateway_manager
+from app.core.scaling import raw_to_tesla_battery_percent
 
 
 @pytest.fixture(autouse=True)
@@ -156,7 +157,8 @@ def connected_gateway(mock_gateway_manager, mock_pypowerwall):
     # Create data
     data = PowerwallData(
         aggregates=mock_pypowerwall.poll.return_value,
-        soe=mock_pypowerwall.level.return_value,
+        soe_raw=mock_pypowerwall.level.return_value,
+        soe=raw_to_tesla_battery_percent(mock_pypowerwall.level.return_value),
         freq=mock_pypowerwall.freq.return_value,
         status=mock_pypowerwall.status.return_value,
         version=mock_pypowerwall.version.return_value,

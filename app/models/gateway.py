@@ -73,7 +73,8 @@ class PowerwallData(BaseModel):
             All values in watts (W)
 
         Battery State:
-            - soe: State of Energy (0-100%)
+            - soe_raw: Raw State of Energy reported by Tesla (typically 5-100%)
+            - soe: Tesla app style displayed State of Energy (0-100%)
             - Battery capacity and reserve settings
 
         Device Vitals:
@@ -97,7 +98,8 @@ class PowerwallData(BaseModel):
         vitals: Device-level telemetry (temps, voltages, currents)
         strings: Solar string data (voltages, currents per string)
         aggregates: Energy flow data (site, battery, solar, load, grid)
-        soe: State of Energy as percentage (0.0-100.0)
+        soe_raw: Raw State of Energy percentage from Tesla/pypowerwall
+        soe: Tesla-displayed State of Energy percentage (0.0-100.0)
         freq: Grid frequency in Hz (typically 50 or 60)
         din: Device Identification Number
         uptime: System uptime string (e.g., "5d 3h 42m")
@@ -127,7 +129,8 @@ class PowerwallData(BaseModel):
     fan_speeds: Optional[Dict[str, Any]] = None  # Fan speed data from TEDAPI
     networks: Optional[List[Any]] = None  # Network configuration
     powerwalls: Optional[Dict[str, Any]] = None  # Powerwalls list
-    soe: Optional[float] = None  # State of Energy
+    soe_raw: Optional[float] = None  # Raw State of Energy from Tesla/pypowerwall
+    soe: Optional[float] = None  # Tesla-displayed State of Energy
     freq: Optional[float] = None
     din: Optional[
         Union[str, Dict[str, Any]]
@@ -207,7 +210,8 @@ class AggregateData(BaseModel):
         - Negative site_power = exporting to grid
 
     Attributes:
-        total_battery_percent: Average state of charge across all batteries (0-100%)
+        total_battery_percent_raw: Average raw state of charge across batteries
+        total_battery_percent: Average Tesla-displayed state of charge (0-100%)
         total_battery_capacity: Combined battery capacity in Wh
         total_site_power: Total grid power in watts (+ import, - export)
         total_battery_power: Total battery power in watts (+ discharge, - charge)
@@ -236,6 +240,7 @@ class AggregateData(BaseModel):
         WS  /ws/aggregate         - Real-time streaming
     """
 
+    total_battery_percent_raw: float = 0.0
     total_battery_percent: float = 0.0
     total_battery_capacity: float = 0.0
     total_site_power: float = 0.0

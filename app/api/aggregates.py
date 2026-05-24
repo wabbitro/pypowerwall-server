@@ -51,7 +51,8 @@ async def get_aggregate():
     and capacity information from all online gateways.
 
     Response includes:
-        - total_battery_percent: Average battery level (%)
+        - total_battery_percent_raw: Average raw battery level (%)
+        - total_battery_percent: Average Tesla-scaled battery level (%)
         - total_battery_capacity: Combined capacity (Wh)
         - total_site_power: Combined site power (W)
         - total_battery_power: Combined battery charge/discharge (W)
@@ -100,7 +101,8 @@ async def get_aggregate_soe():
     and alerting systems.
 
     Response includes:
-        - percentage: Average battery level across all online gateways (0-100%)
+        - percentage: Average Tesla-scaled battery level across online gateways (0-100%)
+        - raw_percentage: Average raw battery level across online gateways
         - num_gateways: Number of online gateways contributing to average
         - timestamp: Data timestamp
 
@@ -109,6 +111,7 @@ async def get_aggregate_soe():
     data = gateway_manager.get_aggregate_data()
     return {
         "percentage": data.total_battery_percent,
+        "raw_percentage": data.total_battery_percent_raw,
         "num_gateways": data.num_online,
         "timestamp": data.timestamp,
     }
@@ -124,7 +127,8 @@ async def get_aggregate_battery():
 
     Response includes:
         - total_capacity: Combined battery capacity in Wh
-        - battery_percent: Average state of charge (0-100%)
+        - battery_percent: Average Tesla-scaled state of charge (0-100%)
+        - battery_percent_raw: Average raw state of charge
         - battery_power: Combined charge/discharge power in watts (+ discharge, - charge)
         - num_gateways: Total configured gateways
         - num_online: Currently connected gateways
@@ -134,6 +138,7 @@ async def get_aggregate_battery():
     return {
         "total_capacity": data.total_battery_capacity,
         "battery_percent": data.total_battery_percent,
+        "battery_percent_raw": data.total_battery_percent_raw,
         "battery_power": data.total_battery_power,
         "num_gateways": data.num_gateways,
         "num_online": data.num_online,

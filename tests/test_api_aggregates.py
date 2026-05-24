@@ -2,6 +2,7 @@
 import pytest
 from app.models.gateway import Gateway, GatewayStatus, PowerwallData
 from app.core.gateway_manager import gateway_manager
+from app.core.scaling import raw_to_tesla_battery_percent
 
 
 # ---------------------------------------------------------------------------
@@ -23,7 +24,8 @@ def two_gateways(mock_gateway_manager, mock_pypowerwall):
         )
         data = PowerwallData(
             aggregates=mock_pypowerwall.poll.return_value,
-            soe=mock_pypowerwall.level.return_value,
+            soe_raw=mock_pypowerwall.level.return_value,
+            soe=raw_to_tesla_battery_percent(mock_pypowerwall.level.return_value),
             freq=mock_pypowerwall.freq.return_value,
             status=mock_pypowerwall.status.return_value,
             version=mock_pypowerwall.version.return_value,
@@ -59,6 +61,7 @@ def test_get_aggregates_success(client, connected_gateway):
     
     # Check for aggregate data structure
     assert "total_battery_percent" in data or "total_site_power" in data
+    assert "total_battery_percent_raw" in data
 
 
 def test_get_aggregates_with_gateway_id(client, connected_gateway):
@@ -194,7 +197,7 @@ def test_gateway_type_inverter(mock_gateway_manager, mock_pypowerwall):
         id="inv", name="Inverter", host="10.0.0.1", gw_pwd="pw", type="inverter"
     )
     data = PowerwallData(
-        aggregates={}, soe=0.0, freq=60.0, status="Running", version="1.0",
+        aggregates={}, soe_raw=0.0, soe=0.0, freq=60.0, status="Running", version="1.0",
         vitals={}, strings={}, system_status={}, grid_status="UP",
         reserve=0.0, time_remaining=0.0, timestamp=0.0,
     )
@@ -217,3 +220,21 @@ def test_gateway_port_field_stored(mock_gateway_manager, mock_pypowerwall):
 def test_gateway_port_none_by_default(connected_gateway):
     """Gateway port defaults to None."""
     assert connected_gateway.gateway.port is None
+
+
+def test_aggregate_soe_exposes_scaled_and_raw(client, connected_gateway):
+    """GET /api/aggregate/soe returns both Tesla-scaled and raw battery percentages."""
+    response = client.get("/api/aggregate/soe")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["percentage"] == pytest.approx(raw_to_tesla_battery_percent(85.5))
+    assert data["raw_percentage"] == 85.5
+
+
+def test_aggregate_battery_exposes_scaled_and_raw(client, connected_gateway):
+    """GET /api/aggregate/battery returns both Tesla-scaled and raw battery percentages."""
+    response = client.get("/api/aggregate/battery")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["battery_percent"] == pytest.approx(raw_to_tesla_battery_percent(85.5))
+    assert data["battery_percent_raw"] == 85.5

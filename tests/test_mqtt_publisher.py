@@ -30,7 +30,8 @@ from app.mqtt.publisher import MqttPublisher, _extract_power
 def make_status(
     gateway_id: str = "test-gw",
     online: bool = True,
-    soe: float = 75.0,
+    soe: float = 73.6842105263,
+    soe_raw: float = 75.0,
     solar: float = 3000.0,
     grid: float = -500.0,
     home: float = 2500.0,
@@ -49,6 +50,7 @@ def make_status(
         online=online,
     )
     data = PowerwallData(
+        soe_raw=soe_raw,
         soe=soe,
         aggregates={
             "solar": {"instant_power": solar},
@@ -167,7 +169,6 @@ class TestMqttPublisherEnabled:
         pub._connected = True
 
         status = make_status(
-            soe=75.0,
             solar=3000.0,
             grid=-500.0,
             home=2500.0,
@@ -187,7 +188,10 @@ class TestMqttPublisherEnabled:
             published[topic] = payload
 
         assert "pypowerwall/test-gw/battery" in published
-        assert published["pypowerwall/test-gw/battery"] == "75.0"
+        assert published["pypowerwall/test-gw/battery"] == "73.7"
+
+        assert "pypowerwall/test-gw/battery_raw" in published
+        assert published["pypowerwall/test-gw/battery_raw"] == "75.0"
 
         assert "pypowerwall/test-gw/solar" in published
         assert published["pypowerwall/test-gw/solar"] == "3000.0"
@@ -240,13 +244,14 @@ class TestMqttPublisherEnabled:
         pub._client = mock_client
         pub._connected = True
 
-        status = make_status(soe=88.0, mode="backup")
+        status = make_status(soe=88.0, soe_raw=88.6, mode="backup")
         await pub.publish_gateway("test-gw", status)
 
         published = {c.args[0]: c.args[1] for c in mock_client.publish.call_args_list}
         assert "pypowerwall/test-gw/status" in published
         summary = json.loads(published["pypowerwall/test-gw/status"])
         assert summary["soe"] == 88.0
+        assert summary["soe_raw"] == 88.6
         assert summary["mode"] == "backup"
         assert summary["online"] is True
 
@@ -293,7 +298,8 @@ class TestMqttPublisherEnabled:
         availability_mode='all', so without this message HA entities stay stuck
         at 'unavailable' even when per-gateway state data is flowing correctly.
         """
-        import aiomqtt
+        import sys
+        import types
         from contextlib import asynccontextmanager
         from unittest.mock import AsyncMock, MagicMock
 
@@ -314,8 +320,13 @@ class TestMqttPublisherEnabled:
         async def fake_sleep(n):
             pub._shutdown = True  # stop inner heartbeat immediately
 
+        fake_aiomqtt = types.SimpleNamespace(
+            Client=lambda **kw: fake_client_ctx(**kw),
+            Will=lambda **kw: kw,
+        )
+
         with (
-            patch("aiomqtt.Client", side_effect=lambda **kw: fake_client_ctx(**kw)),
+            patch.dict(sys.modules, {"aiomqtt": fake_aiomqtt}),
             patch("asyncio.sleep", new=fake_sleep),
         ):
             await pub._connection_loop()

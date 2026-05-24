@@ -1,6 +1,7 @@
 """Tests for legacy proxy API endpoints."""
 import pytest
 from unittest.mock import Mock
+from app.core.scaling import raw_to_tesla_battery_percent
 
 
 def test_aggregates_endpoint(client, connected_gateway):
@@ -19,7 +20,21 @@ def test_soe_endpoint(client, connected_gateway):
     response = client.get("/soe")
     assert response.status_code == 200
     data = response.json()
-    assert data["percentage"] == 85.5
+    assert data["percentage"] == pytest.approx(
+        raw_to_tesla_battery_percent(85.5)
+    )
+    assert data["raw_percentage"] == 85.5
+
+
+def test_api_system_status_soe_endpoint(client, connected_gateway):
+    """Test /api/system_status/soe returns scaled and raw values."""
+    response = client.get("/api/system_status/soe")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["percentage"] == pytest.approx(
+        raw_to_tesla_battery_percent(85.5)
+    )
+    assert data["raw_percentage"] == 85.5
 
 
 def test_csv_endpoint(client, connected_gateway):

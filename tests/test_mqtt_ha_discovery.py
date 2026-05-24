@@ -31,10 +31,12 @@ def make_status(
     gateway_name: str = "Test Gateway",
     version: str = "23.44.0",
     online: bool = True,
-    soe: float = 75.0,
+    soe: float = 73.6842105263,
+    soe_raw: float = 75.0,
 ) -> GatewayStatus:
     gateway = Gateway(id=gateway_id, name=gateway_name, host="192.168.91.1", online=online)
     data = PowerwallData(
+        soe_raw=soe_raw,
         soe=soe,
         aggregates={
             "solar": {"instant_power": 3000.0},
@@ -70,8 +72,8 @@ class TestBuildDiscoveryPayloads:
 
     def test_returns_expected_count(self):
         results = self._payloads()
-        # 9 sensors + 1 binary sensor = 10
-        assert len(results) == 10
+        # 10 sensors + 1 binary sensor = 11
+        assert len(results) == 11
 
     def test_all_topics_start_with_ha_prefix(self):
         results = self._payloads(ha_prefix="homeassistant")
@@ -179,6 +181,10 @@ class TestBuildDiscoveryPayloads:
         assert battery is not None
         assert battery["state_topic"] == "mypw/site2/battery"
 
+        battery_raw = payloads.get("ha/sensor/pypowerwall_site2_battery_raw/config")
+        assert battery_raw is not None
+        assert battery_raw["state_topic"] == "mypw/site2/battery_raw"
+
     def test_version_none_handled(self):
         """build_discovery_payloads() must not crash when version is None."""
         results = build_discovery_payloads(
@@ -188,7 +194,7 @@ class TestBuildDiscoveryPayloads:
             ha_prefix="homeassistant",
             version=None,
         )
-        assert len(results) == 10
+        assert len(results) == 11
         for _, payload_str in results:
             p = json.loads(payload_str)
             assert p["device"]["sw_version"] == "unknown"
@@ -222,7 +228,7 @@ class TestPublisherHaDiscovery:
 
         topics = [c.args[0] for c in mock_client.publish.call_args_list]
         disc_topics = [t for t in topics if "homeassistant" in t]
-        assert len(disc_topics) == 10  # one per sensor/binary_sensor
+        assert len(disc_topics) == 11  # one per sensor/binary_sensor
 
     @pytest.mark.asyncio
     async def test_discovery_sent_only_once_per_connection(self, monkeypatch):
@@ -269,7 +275,7 @@ class TestPublisherHaDiscovery:
             for c in mock_client.publish.call_args_list
             if "homeassistant" in c.args[0]
         ]
-        assert len(disc_topics) == 10
+        assert len(disc_topics) == 11
 
     @pytest.mark.asyncio
     async def test_discovery_skipped_when_ha_discovery_false(self, monkeypatch):
