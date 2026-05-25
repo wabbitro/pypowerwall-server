@@ -13,7 +13,8 @@ Each payload is retained so HA re-reads it after restarts.
 Sensor catalogue
 ----------------
 Sensors (numeric):
-    battery     — Battery charge (%, device_class=battery)
+    battery     — Tesla-scaled battery charge (%, device_class=battery)
+    battery_raw — Raw battery charge (%)
     solar       — Solar power (W, device_class=power)
     grid        — Grid power (W, device_class=power, positive=importing)
     home        — Home load (W, device_class=power)
@@ -160,6 +161,14 @@ def build_discovery_payloads(
             unit="%",
             device_class="battery",
             state_class="measurement",
+        ),
+        sensor(
+            "battery_raw", "Battery Raw",
+            f"{data_prefix}/battery_raw",
+            unit="%",
+            state_class="measurement",
+            icon="mdi:battery-medium",
+            entity_category="diagnostic",
         ),
         sensor(
             "solar", "Solar Power",

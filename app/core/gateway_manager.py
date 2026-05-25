@@ -68,6 +68,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pypowerwall
 from app.models.gateway import Gateway, GatewayStatus, PowerwallData, AggregateData
+from app.core.scaling import raw_to_tesla_battery_percent
 from app.config import GatewayConfig
 
 logger = logging.getLogger(__name__)
@@ -484,9 +485,10 @@ class GatewayManager:
 
             # Try to get additional data
             try:
-                data.soe = await asyncio.wait_for(
+                data.soe_raw = await asyncio.wait_for(
                     loop.run_in_executor(self._executor, pw.level), timeout=5.0
                 )
+                data.soe = raw_to_tesla_battery_percent(data.soe_raw)
             except (asyncio.TimeoutError, Exception) as e:
                 logger.debug(f"SOE not available for {gateway_id}: {e}")
 
@@ -1049,6 +1051,8 @@ class GatewayManager:
 
             # Aggregate battery percentage
             # TODO: Weight by capacity when battery capacity info is available
+            if data.soe_raw is not None:
+                aggregate.total_battery_percent_raw += data.soe_raw
             if data.soe is not None:
                 aggregate.total_battery_percent += data.soe
 
@@ -1077,6 +1081,7 @@ class GatewayManager:
 
         # Calculate average battery percentage (simple average for now)
         if aggregate.num_online > 0:
+            aggregate.total_battery_percent_raw /= aggregate.num_online
             aggregate.total_battery_percent /= aggregate.num_online
 
         # Grid power is the site power (positive = importing, negative = exporting)

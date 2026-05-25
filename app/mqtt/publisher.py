@@ -31,7 +31,8 @@ manager, triggering the outer reconnect logic.
 
 Topic layout
 ------------
-    {prefix}/{gateway_id}/battery         float  — SOE %
+    {prefix}/{gateway_id}/battery         float  — Tesla-scaled SOE %
+    {prefix}/{gateway_id}/battery_raw     float  — raw SOE %
     {prefix}/{gateway_id}/solar           float  — W (positive = producing)
     {prefix}/{gateway_id}/grid            float  — W (positive = importing)
     {prefix}/{gateway_id}/home            float  — W
@@ -190,6 +191,10 @@ class MqttPublisher:
                     await self._safe_publish(
                         f"{prefix}/battery", f"{data.soe:.1f}", retain, qos
                     )
+                if data.soe_raw is not None:
+                    await self._safe_publish(
+                        f"{prefix}/battery_raw", f"{data.soe_raw:.1f}", retain, qos
+                    )
 
                 # Power flow from aggregates
                 if data.aggregates:
@@ -249,6 +254,7 @@ class MqttPublisher:
                 summary = {
                     "online": status.online,
                     "soe": data.soe,
+                    "soe_raw": data.soe_raw,
                     "solar": solar if data.aggregates else None,
                     "grid": grid if data.aggregates else None,
                     "home": home if data.aggregates else None,

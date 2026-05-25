@@ -1437,11 +1437,9 @@
             const batteryEl = document.getElementById('battery-power');
             batteryEl.innerHTML = `${batteryData.value}<span class="energy-arrow ${batteryData.arrowClass}">${batteryData.arrow}</span>`;
             
-            // Scale battery level using Tesla App formula: (level / 0.95) - (5 / 0.95)
             let batteryLevel = '--';
             if (data.total_battery_percent != null) {
-                const rawLevel = data.total_battery_percent;
-                batteryLevel = ((rawLevel / 0.95) - (5 / 0.95)).toFixed(1);
+                batteryLevel = data.total_battery_percent.toFixed(1);
             }
             document.getElementById('battery-level').textContent = `${batteryLevel}%`;
             addTrendPoint('battery', (data.total_battery_power || 0) / 1000);

@@ -242,15 +242,18 @@ async def get_soe():
     """Get state of energy (legacy proxy endpoint).
 
     Uses graceful degradation: returns cached data even if gateway is temporarily offline.
-    Returns null percentage if no data available yet.
+    Returns Tesla-scaled percentage plus the preserved raw percentage if available.
     """
     gateway_id = get_default_gateway()
     status = gateway_manager.get_gateway(gateway_id)
 
-    if not status or not status.data or status.data.soe is None:
-        return {"percentage": None}
+    if not status or not status.data:
+        return {"percentage": None, "raw_percentage": None}
 
-    return {"percentage": status.data.soe}
+    return {
+        "percentage": status.data.soe,
+        "raw_percentage": status.data.soe_raw,
+    }
 
 
 @router.get("/freq")
@@ -351,7 +354,7 @@ async def get_csv(headers: Optional[str] = None):
     solar = aggregates.get("solar", {}).get("instant_power", 0)
     battery = aggregates.get("battery", {}).get("instant_power", 0)
     home = aggregates.get("load", {}).get("instant_power", 0)
-    level = status.data.soe or 0
+    level = status.data.soe_raw or 0
 
     # Build CSV response
     csv_data = ""
@@ -390,7 +393,7 @@ async def get_csv_v2(headers: Optional[str] = None):
     solar = aggregates.get("solar", {}).get("instant_power", 0)
     battery = aggregates.get("battery", {}).get("instant_power", 0)
     home = aggregates.get("load", {}).get("instant_power", 0)
-    level = status.data.soe or 0
+    level = status.data.soe_raw or 0
 
     # Get grid status from cache (1=UP, 0=DOWN)
     grid_status_str = status.data.grid_status
@@ -766,6 +769,7 @@ async def get_json():
             "solar": 0,
             "battery": 0,
             "soe": 0,
+            "soe_raw": 0,
             "grid_status": 0,
             "reserve": 0,
             "time_remaining_hours": 0,
@@ -783,6 +787,7 @@ async def get_json():
 
     # Get battery level (SOE)
     soe = status.data.soe if status.data.soe is not None else 0
+    soe_raw = status.data.soe_raw if status.data.soe_raw is not None else 0
 
     # Convert grid_status to numeric (1=UP, 0=DOWN)
     grid_status_str = status.data.grid_status or "DOWN"
@@ -808,6 +813,7 @@ async def get_json():
         "solar": solar,
         "battery": battery,
         "soe": soe,
+        "soe_raw": soe_raw,
         "grid_status": grid_status,
         "reserve": reserve,
         "time_remaining_hours": time_remaining,
@@ -869,14 +875,12 @@ async def get_api_soe():
     status = gateway_manager.get_gateway(gateway_id)
 
     if not status or not status.data:
-        return {"percentage": None}
+        return {"percentage": None, "raw_percentage": None}
 
-    level = status.data.soe
-    if level is not None:
-        # Scale using Tesla App formula: reserves bottom 5%, maps 5%->0% and 100%->100%
-        level = (level / 0.95) - (5 / 0.95)
-
-    return {"percentage": level}
+    return {
+        "percentage": status.data.soe,
+        "raw_percentage": status.data.soe_raw,
+    }
 
 
 @router.get("/api/system_status/grid_status")
