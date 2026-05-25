@@ -580,15 +580,15 @@ def test_pw_din(client, connected_gateway):
     response = client.get("/pw/din")
     assert response.status_code == 200
     data = response.json()
-    assert "din" in data
+    assert data["din"] == "1232100-00-E--T14111AB1234567"
 
 
 def test_pw_uptime(client, connected_gateway):
-    """Test /pw/uptime returns uptime."""
+    """Test /pw/uptime returns uptime string."""
     response = client.get("/pw/uptime")
     assert response.status_code == 200
     data = response.json()
-    assert "uptime" in data
+    assert data["uptime"] == "5d 3h 42m"
 
 
 def test_pw_version(client, connected_gateway):

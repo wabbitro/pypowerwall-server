@@ -1356,7 +1356,7 @@ async def pw_din():
 
 @router.get("/pw/uptime")
 async def pw_uptime():
-    """Uptime (seconds)."""
+    """System uptime string (e.g., '5d 3h 42m')."""
     gateway_id = get_default_gateway()
     status = gateway_manager.get_gateway(gateway_id)
 

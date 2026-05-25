@@ -513,6 +513,20 @@ class GatewayManager:
             except (asyncio.TimeoutError, Exception) as e:
                 logger.debug(f"Version not available for {gateway_id}: {e}")
 
+            try:
+                data.din = await asyncio.wait_for(
+                    loop.run_in_executor(self._executor, pw.din), timeout=5.0
+                )
+            except (asyncio.TimeoutError, Exception) as e:
+                logger.debug(f"DIN not available for {gateway_id}: {e}")
+
+            try:
+                data.uptime = await asyncio.wait_for(
+                    loop.run_in_executor(self._executor, pw.uptime), timeout=5.0
+                )
+            except (asyncio.TimeoutError, Exception) as e:
+                logger.debug(f"Uptime not available for {gateway_id}: {e}")
+
             logger.debug(f"Gateway {gateway_id} aggregates: {data.aggregates}")
 
             # Try to get alerts (for caching)
