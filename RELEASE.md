@@ -5,7 +5,7 @@
 ### [0.3.2] - 2026-05-24
 
 **Fixed:**
-- **Battery percentage now consistently Tesla-scaled** across all surfaces — API, MQTT, Home Assistant discovery, aggregate endpoints, WebSocket, and CSV outputs now publish both raw SOE and Tesla-app-scaled battery percentage. Previously, MQTT/HA consumers saw the raw SOE value (~4% higher than Tesla app) while the web dashboard happened to rescale client-side (#42). Thanks @sphen13 for the thorough diagnostics!
+- **Battery percentage now Tesla-scaled** in API, MQTT, Home Assistant discovery, aggregate endpoints, and WebSocket outputs. Each surface now exposes both raw SOE and Tesla-app-scaled battery percentage. Previously, MQTT/HA consumers saw the raw SOE value (~4% higher than Tesla app) while the web dashboard happened to rescale client-side (#42). CSV outputs (`/csv`, `/csv/v2`) remain unchanged — they continue to publish raw SOE for backwards compatibility with Telegraf/InfluxDB. Thanks @sphen13 for the thorough diagnostics!
 - **`PW_AUTH_PATH` env var** — fixed mismatched env var name (`PW_AUTHPATH` → `PW_AUTH_PATH`) in CLI argument processing so the documented variable name works everywhere (#41).
 
 **Added:**

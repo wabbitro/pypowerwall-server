@@ -354,7 +354,7 @@ async def get_csv(headers: Optional[str] = None):
     solar = aggregates.get("solar", {}).get("instant_power", 0)
     battery = aggregates.get("battery", {}).get("instant_power", 0)
     home = aggregates.get("load", {}).get("instant_power", 0)
-    level = status.data.soe or 0
+    level = status.data.soe_raw or 0
 
     # Build CSV response
     csv_data = ""
@@ -393,7 +393,7 @@ async def get_csv_v2(headers: Optional[str] = None):
     solar = aggregates.get("solar", {}).get("instant_power", 0)
     battery = aggregates.get("battery", {}).get("instant_power", 0)
     home = aggregates.get("load", {}).get("instant_power", 0)
-    level = status.data.soe or 0
+    level = status.data.soe_raw or 0
 
     # Get grid status from cache (1=UP, 0=DOWN)
     grid_status_str = status.data.grid_status
