@@ -77,6 +77,8 @@ def mock_pypowerwall():
         "TEPOD--1234": 25.5
     }
     mock.alerts.return_value = []
+    mock.din.return_value = "1232100-00-E--T14111AB1234567"
+    mock.uptime.return_value = "5d 3h 42m"
     mock.get_reserve.return_value = 20
     mock.get_time_remaining.return_value = 8.5
     mock.get_mode.return_value = "self_consumption"
@@ -162,6 +164,8 @@ def connected_gateway(mock_gateway_manager, mock_pypowerwall):
         freq=mock_pypowerwall.freq.return_value,
         status=mock_pypowerwall.status.return_value,
         version=mock_pypowerwall.version.return_value,
+        din=mock_pypowerwall.din.return_value,
+        uptime=mock_pypowerwall.uptime.return_value,
         vitals=mock_pypowerwall.vitals.return_value,
         strings=mock_pypowerwall.strings.return_value,
         system_status=mock_pypowerwall.system_status.return_value,

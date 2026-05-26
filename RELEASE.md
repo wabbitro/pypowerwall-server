@@ -2,6 +2,14 @@
 
 ## Version History
 
+### [0.3.3] - 2026-05-26
+
+**Added:**
+- **`/pw/*` convenience endpoints** — 25 legacy proxy-compatible shorthand endpoints for backward compatibility with the original pypowerwall proxy. All endpoints are read-only, cache-backed (non-blocking), and thread-safe. Includes full test coverage (#13).
+- **`din` and `uptime` polling** — `pw.din()` and `pw.uptime()` are now polled in the background poller alongside `pw.version()`, so the `/pw/din` and `/pw/uptime` endpoints return live data.
+
+**Endpoint list:** `/pw/status`, `/pw/soe`, `/pw/battery`, `/pw/grid`, `/pw/home`, `/pw/solar`, `/pw/vitals`, `/pw/pods`, `/pw/strings`, `/pw/power`, `/pw/short`, `/pw/din`, `/pw/uptime`, `/pw/version`, `/pw/temp`, `/pw/alerts`, `/pw/site`, `/pw/status_aggregates`, `/pw/imei`, `/pw/fwupdate`, `/pw/solars`, `/pw/meters`, `/pw/orig`, `/pw/customer`, `/pw/networks`
+
 ### [0.3.2] - 2026-05-24
 
 **Fixed:**
