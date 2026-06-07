@@ -59,7 +59,7 @@ def mock_pypowerwall():
             "POD_nom_energy_to_be_charged": 1500,
             "POD_nom_full_pack_energy": 13500
         },
-        "TEPINV--1234": {
+        "TEPINV--1234567-00-A--TG1234567890AB": {
             "PINV_Fout": 60.0,
             "PINV_VSplit1": 120.0,
             "PINV_VSplit2": 120.0

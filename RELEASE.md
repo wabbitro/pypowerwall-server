@@ -2,6 +2,17 @@
 
 ## Version History
 
+### [0.3.4] - 2026-06-07
+
+**Fixed:**
+- **Multi-Powerwall visibility in TEDAPI full mode** — in WiFi-only TEDAPI mode (no v1r RSA key), follower Powerwalls were invisible in the `/freq` endpoint because their TEDAPI endpoints are unreachable without a WiFi session. The endpoint now uses `tedapi_config` (from gateway `config.json`, which always lists all registered units) as the authoritative Powerwall list and matches per-Powerwall data by serial number rather than sequential index. Follower units now appear with whatever data is available; fields not reachable without v1r are `null` (#47).
+- **MQTT entities stuck "unavailable" on broker reconnect** — the global `{prefix}/availability` topic was never published as `"online"` after (re)connecting to the broker. Home Assistant entities therefore remained unavailable even while data was flowing. Fixed by publishing `"online"` (retained) to the global availability topic immediately after each successful connection (#33).
+- **Orphan "Unknown Device" in Home Assistant** — HA discovery payloads included a `via_device: "pypowerwall-server"` field that referenced a device never registered with HA, creating a phantom device entry. Removed the field entirely (#34).
+- **`grid_charging` control accepts only explicit booleans** — `POST /control/grid_charging` now returns HTTP 400 if `value` is absent or not a boolean, preventing silent state changes from malformed payloads (#29).
+
+**Changed:**
+- **Transient multi-PW TEDAPI snapshot guard** — if a single poll cycle drops follower vitals or `battery_blocks` (e.g., a momentary TEDAPI timeout), the cache layer now preserves the previous complete multi-Powerwall snapshot rather than replacing it with a degraded single-Powerwall view. Applies to all cache consumers (MQTT, WebSocket, `/pod`, `/freq`, etc.).
+
 ### [0.3.3] - 2026-05-26
 
 **Added:**

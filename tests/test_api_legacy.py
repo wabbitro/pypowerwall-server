@@ -141,7 +141,7 @@ def test_freq_endpoint(client, connected_gateway):
     assert data["PW1_PackageSerialNumber"] == "TG1234567890AB"
     
     # Verify values from vitals TEPINV
-    assert data["PW1_name"] == "TEPINV--1234"
+    assert data["PW1_name"] == "TEPINV--1234567-00-A--TG1234567890AB"
     assert data["PW1_PINV_Fout"] == 60.0
     assert data["PW1_PINV_VSplit1"] == 120.0
     assert data["PW1_PINV_VSplit2"] == 120.0
@@ -556,7 +556,7 @@ def test_pw_vitals(client, connected_gateway):
     assert response.status_code == 200
     data = response.json()
     assert "TEPOD--1234" in data
-    assert "TEPINV--1234" in data
+    assert "TEPINV--1234567-00-A--TG1234567890AB" in data
 
 
 def test_pw_temps(client, connected_gateway):
