@@ -129,10 +129,11 @@ async def test_polling_with_missing_optional_data(mock_gateway_manager, mock_pyp
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("expected_blocks", [2, 10])
 async def test_polling_preserves_complete_multi_pw_snapshot_on_partial_tedapi_drop(
-    mock_gateway_manager, mock_pypowerwall
+    mock_gateway_manager, mock_pypowerwall, expected_blocks
 ):
-    """Keep the richer multi-PW TEDAPI snapshot when one poll transiently drops a follower."""
+    """Keep the richer multi-PW TEDAPI snapshot when one poll transiently drops followers."""
     from app.models.gateway import Gateway, GatewayStatus, PowerwallData
 
     gateway = Gateway(
@@ -143,19 +144,22 @@ async def test_polling_preserves_complete_multi_pw_snapshot_on_partial_tedapi_dr
     )
 
     previous_vitals = {
-        "TEPINV--leader": {"PINV_Fout": 60.0},
-        "TEPINV--follower": {"PINV_Fout": 60.1},
+        f"TEPINV--pw{idx}": {"PINV_Fout": 60.0 + (idx * 0.01)}
+        for idx in range(1, expected_blocks + 1)
     }
     previous_system_status = {
         "battery_blocks": [
-            {"PackageSerialNumber": "PW1", "f_out": 60.0},
-            {"PackageSerialNumber": "PW2", "f_out": 60.1},
+            {
+                "PackageSerialNumber": f"PW{idx}",
+                "f_out": 60.0 + (idx * 0.01),
+            }
+            for idx in range(1, expected_blocks + 1)
         ]
     }
     previous_tedapi_config = {
         "battery_blocks": [
-            {"type": "Powerwall3"},
-            {"type": "Powerwall3Follower"},
+            {"type": "Powerwall3" if idx == 1 else "Powerwall3Follower"}
+            for idx in range(1, expected_blocks + 1)
         ]
     }
 
@@ -175,11 +179,11 @@ async def test_polling_preserves_complete_multi_pw_snapshot_on_partial_tedapi_dr
     )
 
     mock_pypowerwall.vitals.return_value = {
-        "TEPINV--leader": {"PINV_Fout": 60.0},
+        "TEPINV--pw1": {"PINV_Fout": 60.01},
     }
     mock_pypowerwall.system_status.return_value = {
         "battery_blocks": [
-            {"PackageSerialNumber": "PW1", "f_out": 60.0},
+            {"PackageSerialNumber": "PW1", "f_out": 60.01},
         ]
     }
     mock_pypowerwall.tedapi.get_config.return_value = previous_tedapi_config
@@ -188,15 +192,16 @@ async def test_polling_preserves_complete_multi_pw_snapshot_on_partial_tedapi_dr
 
     status = mock_gateway_manager.get_gateway("multi-pw-test")
     assert status.online is True
-    assert len(status.data.tedapi_config["battery_blocks"]) == 2
+    assert len(status.data.tedapi_config["battery_blocks"]) == expected_blocks
     assert list(status.data.vitals.keys()) == list(previous_vitals.keys())
     assert (
         len(status.data.system_status["battery_blocks"])
         == len(previous_system_status["battery_blocks"])
-        == 2
+        == expected_blocks
     )
     assert (
-        status.data.system_status["battery_blocks"][1]["PackageSerialNumber"] == "PW2"
+        status.data.system_status["battery_blocks"][-1]["PackageSerialNumber"]
+        == f"PW{expected_blocks}"
     )
 
 
