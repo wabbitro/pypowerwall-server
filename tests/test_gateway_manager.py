@@ -306,6 +306,191 @@ async def test_rsa_key_path_passed_to_powerwall_constructor(monkeypatch, mock_py
     assert call_kwargs.get("rsa_key_path") == "/keys/tedapi_rsa_private.pem"
     assert call_kwargs.get("host") == "192.168.91.1"
 # ---------------------------------------------------------------------------
+# Multi-PW snapshot guard — config convergence & staleness cap
+# ---------------------------------------------------------------------------
+
+
+def test_preserve_guard_trusts_current_config_over_stale_previous(
+    mock_gateway_manager,
+):
+    """When current TEDAPI config says 1 block but previous says 2, trust current.
+
+    This prevents the max() latch problem: a gateway that legitimately transitions
+    from multi-PW to single-PW should converge immediately, not be stuck preserving
+    old multi-PW snapshots.
+    """
+    from app.models.gateway import PowerwallData
+
+    gateway_id = "config-convergence-test"
+    previous = PowerwallData(
+        vitals={
+            "TEPINV--leader": {"PINV_Fout": 60.0},
+            "TEPINV--follower": {"PINV_Fout": 60.1},
+        },
+        system_status={
+            "battery_blocks": [
+                {"PackageSerialNumber": "PW1"},
+                {"PackageSerialNumber": "PW2"},
+            ]
+        },
+        tedapi_config={"battery_blocks": [{"type": "PW3"}, {"type": "PW3Follower"}]},
+    )
+    current = PowerwallData(
+        vitals={"TEPINV--leader": {"PINV_Fout": 59.9}},
+        system_status={"battery_blocks": [{"PackageSerialNumber": "PW1-new"}]},
+        tedapi_config={"battery_blocks": [{"type": "Powerwall3"}]},  # now single-PW
+    )
+    mock_gateway_manager._last_successful_data[gateway_id] = previous
+
+    result = mock_gateway_manager._preserve_complete_multi_pw_snapshot(
+        gateway_id, current
+    )
+
+    # Current config says 1 block — no preservation should occur
+    assert result.vitals["TEPINV--leader"]["PINV_Fout"] == 59.9
+    assert len(result.system_status["battery_blocks"]) == 1
+    assert result.system_status["battery_blocks"][0]["PackageSerialNumber"] == "PW1-new"
+
+
+def test_preserve_guard_uses_previous_config_when_current_is_missing(
+    mock_gateway_manager,
+):
+    """When current TEDAPI config is empty, fall back to previous count."""
+    from app.models.gateway import PowerwallData
+
+    gateway_id = "missing-config-test"
+    previous = PowerwallData(
+        vitals={
+            "TEPINV--leader": {"PINV_Fout": 60.0},
+            "TEPINV--follower": {"PINV_Fout": 60.1},
+        },
+        system_status={
+            "battery_blocks": [
+                {"PackageSerialNumber": "PW1"},
+                {"PackageSerialNumber": "PW2"},
+            ]
+        },
+        tedapi_config={"battery_blocks": [{"type": "PW3"}, {"type": "PW3Follower"}]},
+    )
+    current = PowerwallData(
+        vitals={"TEPINV--leader": {"PINV_Fout": 59.9}},
+        system_status={"battery_blocks": [{"PackageSerialNumber": "PW1-new"}]},
+        tedapi_config=None,  # transient read failure
+    )
+    mock_gateway_manager._last_successful_data[gateway_id] = previous
+
+    result = mock_gateway_manager._preserve_complete_multi_pw_snapshot(
+        gateway_id, current
+    )
+
+    # Should preserve previous multi-PW snapshot (previous config used as fallback)
+    assert len(result.vitals) == 2
+    assert len(result.system_status["battery_blocks"]) == 2
+
+
+def test_preserve_guard_staleness_cap_lets_partial_data_through(
+    mock_gateway_manager,
+):
+    """After _PRESERVE_STALENESS_CAP consecutive preserved polls, partial data passes."""
+    from app.models.gateway import PowerwallData
+
+    gateway_id = "stale-cap-test"
+    cap = mock_gateway_manager._PRESERVE_STALENESS_CAP
+
+    previous = PowerwallData(
+        vitals={
+            "TEPINV--leader": {"PINV_Fout": 60.0},
+            "TEPINV--follower": {"PINV_Fout": 60.1},
+        },
+        system_status={
+            "battery_blocks": [
+                {"PackageSerialNumber": "PW1"},
+                {"PackageSerialNumber": "PW2"},
+            ]
+        },
+        tedapi_config={"battery_blocks": [{"type": "PW3"}, {"type": "PW3Follower"}]},
+    )
+
+    # Simulate (cap) preserved polls to fill the staleness counter
+    for i in range(cap):
+        mock_gateway_manager._preserve_stale_count[gateway_id] = i
+        mock_gateway_manager._last_successful_data[gateway_id] = previous
+        current = PowerwallData(
+            vitals={"TEPINV--leader": {"PINV_Fout": float(59 + i)}},
+            system_status={"battery_blocks": [{"PackageSerialNumber": "PW1"}]},
+            tedapi_config={"battery_blocks": [{"type": "PW3"}, {"type": "PW3Follower"}]},
+        )
+        result = mock_gateway_manager._preserve_complete_multi_pw_snapshot(
+            gateway_id, current
+        )
+        # Should still be preserved
+        assert len(result.vitals) == 2, f"Failed at iteration {i}"
+
+    # Now the cap-th poll — staleness counter should be at cap-1, this push hits cap
+    mock_gateway_manager._last_successful_data[gateway_id] = previous
+    current = PowerwallData(
+        vitals={"TEPINV--leader": {"PINV_Fout": 55.0}},
+        system_status={"battery_blocks": [{"PackageSerialNumber": "PW1"}]},
+        tedapi_config={"battery_blocks": [{"type": "PW3"}, {"type": "PW3Follower"}]},
+    )
+    result = mock_gateway_manager._preserve_complete_multi_pw_snapshot(
+        gateway_id, current
+    )
+
+    # Cap reached — partial data should pass through
+    assert len(result.vitals) == 1
+    assert result.vitals["TEPINV--leader"]["PINV_Fout"] == 55.0
+    assert len(result.system_status["battery_blocks"]) == 1
+
+
+def test_preserve_guard_resets_staleness_on_complete_poll(
+    mock_gateway_manager,
+):
+    """A complete poll resets the staleness counter to zero."""
+    from app.models.gateway import PowerwallData
+
+    gateway_id = "reset-stale-test"
+    mock_gateway_manager._preserve_stale_count[gateway_id] = 2
+
+    previous = PowerwallData(
+        vitals={
+            "TEPINV--leader": {"PINV_Fout": 60.0},
+            "TEPINV--follower": {"PINV_Fout": 60.1},
+        },
+        system_status={
+            "battery_blocks": [
+                {"PackageSerialNumber": "PW1"},
+                {"PackageSerialNumber": "PW2"},
+            ]
+        },
+        tedapi_config={"battery_blocks": [{"type": "PW3"}, {"type": "PW3Follower"}]},
+    )
+    # Current poll has complete data (2 blocks)
+    current = PowerwallData(
+        vitals={
+            "TEPINV--leader": {"PINV_Fout": 59.9},
+            "TEPINV--follower": {"PINV_Fout": 60.0},
+        },
+        system_status={
+            "battery_blocks": [
+                {"PackageSerialNumber": "PW1-new"},
+                {"PackageSerialNumber": "PW2-new"},
+            ]
+        },
+        tedapi_config={"battery_blocks": [{"type": "PW3"}, {"type": "PW3Follower"}]},
+    )
+    mock_gateway_manager._last_successful_data[gateway_id] = previous
+
+    result = mock_gateway_manager._preserve_complete_multi_pw_snapshot(
+        gateway_id, current
+    )
+
+    # No preservation needed — current data is complete
+    assert result.vitals["TEPINV--leader"]["PINV_Fout"] == 59.9
+    assert gateway_id not in mock_gateway_manager._preserve_stale_count
+
+
+# ---------------------------------------------------------------------------
 # cloud_control() method tests
 # ---------------------------------------------------------------------------
 

@@ -131,6 +131,8 @@ def mock_gateway_manager(monkeypatch, mock_pypowerwall):
     gateway_manager.gateways.clear()
     gateway_manager.connections.clear()
     gateway_manager.cache.clear()
+    gateway_manager._last_successful_data.clear()
+    gateway_manager._preserve_stale_count.clear()
     
     # Mock the Powerwall constructor
     def mock_powerwall_init(*args, **kwargs):

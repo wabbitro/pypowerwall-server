@@ -96,6 +96,7 @@ class GatewayManager:
         self._pending_configs: Dict[
             str, GatewayConfig
         ] = {}  # Gateways waiting for lazy initialization
+        self._preserve_stale_count: Dict[str, int] = {}  # Multi-PW snapshot preservation staleness tracker
 
         # Dedicated thread pool for blocking pypowerwall operations
         # Will be sized during initialize() based on gateway count
@@ -131,6 +132,10 @@ class GatewayManager:
         battery_blocks = system_status.get("battery_blocks") or []
         return len(battery_blocks) if isinstance(battery_blocks, list) else 0
 
+    # Max consecutive polls a preserved snapshot is promoted before letting
+    # partial data through.  Prevents stale follower data from living forever.
+    _PRESERVE_STALENESS_CAP = 3
+
     def _preserve_complete_multi_pw_snapshot(
         self, gateway_id: str, data: PowerwallData
     ) -> PowerwallData:
@@ -139,17 +144,45 @@ class GatewayManager:
         TEDAPI multi-PW data is synthesized in pypowerwall from follower vitals.
         If a single poll cycle drops follower data, the server can otherwise cache a
         one-PW snapshot even though the gateway config still reports multiple blocks.
+
+        The guard is capped at ``_PRESERVE_STALENESS_CAP`` consecutive polls — after
+        that, the partial data passes through so downstream consumers see reality.
         """
         previous = self._last_successful_data.get(gateway_id)
         if not previous:
             return data
 
-        expected_blocks = max(
-            self._expected_battery_block_count(data),
-            self._expected_battery_block_count(previous),
-        )
+        current_config_count = self._expected_battery_block_count(data)
+        previous_config_count = self._expected_battery_block_count(previous)
+
+        # Trust the current TEDAPI config when it is present and non-zero.
+        # Only fall back to the previous (larger) count when the current config
+        # is missing — that indicates a transient read failure, not a legitimate
+        # transition from multi-PW to single-PW.
+        if current_config_count > 0:
+            expected_blocks = current_config_count
+        else:
+            expected_blocks = previous_config_count
+
         if expected_blocks < 2:
+            # Not a multi-PW system (or no longer one) — reset staleness counter.
+            self._preserve_stale_count.pop(gateway_id, None)
             return data
+
+        # --- Staleness cap ---
+        stale_key = gateway_id
+        stale_count = self._preserve_stale_count.get(stale_key, 0)
+        if stale_count >= self._PRESERVE_STALENESS_CAP:
+            logger.warning(
+                "Preservation guard for %s hit staleness cap (%d polls) — "
+                "letting partial data through",
+                gateway_id,
+                self._PRESERVE_STALENESS_CAP,
+            )
+            self._preserve_stale_count.pop(stale_key, None)
+            return data
+
+        preserved_any = False
 
         current_vitals_count = self._count_tepinv_devices(data.vitals)
         previous_vitals_count = self._count_tepinv_devices(previous.vitals)
@@ -161,27 +194,41 @@ class GatewayManager:
             and previous_vitals_count >= expected_blocks
         ):
             logger.warning(
-                "Preserving prior complete vitals snapshot for %s: expected %d TEPINV blocks, got %d in current poll",
+                "Preserving prior complete vitals snapshot for %s: "
+                "expected %d TEPINV blocks, got %d in current poll (stale %d/%d)",
                 gateway_id,
                 expected_blocks,
                 current_vitals_count,
+                stale_count + 1,
+                self._PRESERVE_STALENESS_CAP,
             )
             data.vitals = deepcopy(previous.vitals)
+            preserved_any = True
 
         if (
             current_status_count < expected_blocks
             and previous_status_count >= expected_blocks
         ):
             logger.warning(
-                "Preserving prior complete system_status snapshot for %s: expected %d battery blocks, got %d in current poll",
+                "Preserving prior complete system_status snapshot for %s: "
+                "expected %d battery blocks, got %d in current poll (stale %d/%d)",
                 gateway_id,
                 expected_blocks,
                 current_status_count,
+                stale_count + 1,
+                self._PRESERVE_STALENESS_CAP,
             )
             data.system_status = deepcopy(previous.system_status)
+            preserved_any = True
 
         if not data.tedapi_config and previous.tedapi_config:
             data.tedapi_config = deepcopy(previous.tedapi_config)
+
+        if preserved_any:
+            self._preserve_stale_count[stale_key] = stale_count + 1
+        else:
+            # Current poll was complete — reset staleness.
+            self._preserve_stale_count.pop(stale_key, None)
 
         return data
 
