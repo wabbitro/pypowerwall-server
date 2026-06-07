@@ -278,38 +278,80 @@ async def get_freq():
         return {"freq": None}
 
     fcv = {}
-    idx = 1
-
-    # Pull freq, current, voltage of each Powerwall via system_status
-    system_status = status.data.system_status or {}
-    if "battery_blocks" in system_status:
-        for block in system_status["battery_blocks"]:
-            fcv[f"PW{idx}_name"] = None  # Placeholder for vitals
-            fcv[f"PW{idx}_PINV_Fout"] = block.get("f_out")
-            fcv[f"PW{idx}_PINV_VSplit1"] = None  # Placeholder for vitals
-            fcv[f"PW{idx}_PINV_VSplit2"] = None  # Placeholder for vitals
-            fcv[f"PW{idx}_PackagePartNumber"] = block.get("PackagePartNumber")
-            fcv[f"PW{idx}_PackageSerialNumber"] = block.get("PackageSerialNumber")
-            fcv[f"PW{idx}_p_out"] = block.get("p_out")
-            fcv[f"PW{idx}_q_out"] = block.get("q_out")
-            fcv[f"PW{idx}_v_out"] = block.get("v_out")
-            fcv[f"PW{idx}_f_out"] = block.get("f_out")
-            fcv[f"PW{idx}_i_out"] = block.get("i_out")
-            idx += 1
-
-    # Pull freq, current, voltage of each Powerwall via vitals if available
     vitals = status.data.vitals or {}
-    idx = 1
+    system_status = status.data.system_status or {}
+
+    # --- Build serial-keyed lookup maps ---
+
+    # Map PackageSerialNumber → system_status battery block
+    ss_block_map: dict = {}
+    for block in (system_status.get("battery_blocks") or []):
+        serial = block.get("PackageSerialNumber")
+        if serial:
+            ss_block_map[serial] = block
+
+    # Map PackageSerialNumber → (TEPINV device key, TEPINV vitals data)
+    # Key format: TEPINV--{partno}--{serial}  (TEDAPI / PW3)
+    #         or: TEPINV--{serial}              (local API / older PW)
+    # rsplit on "--" with maxsplit=1 extracts the serial from both formats.
+    tepinv_map: dict = {}
     for device, d in vitals.items():
-        if device.startswith("TEPINV"):
-            # PW freq
-            fcv[f"PW{idx}_name"] = device
-            fcv[f"PW{idx}_PINV_Fout"] = d.get("PINV_Fout")
-            fcv[f"PW{idx}_PINV_VSplit1"] = d.get("PINV_VSplit1")
-            fcv[f"PW{idx}_PINV_VSplit2"] = d.get("PINV_VSplit2")
-            idx += 1
+        if device.startswith("TEPINV--"):
+            serial = device.rsplit("--", 1)[1]
+            tepinv_map[serial] = (device, d)
+
+    # --- Determine authoritative ordering of Powerwalls ---
+    # Use tedapi_config (fetched from gateway config.json) as the authoritative source.
+    # In TEDAPI full mode (WiFi only), vitals and system_status only cover the primary
+    # Powerwall because the follower's TEDAPI endpoint is unreachable without v1r/WiFi.
+    # config.json is served by the primary and lists all registered units including followers.
+    pw_serials: list = []
+    config_part_map: dict = {}  # serial → part number (from VIN field)
+
+    tedapi_config = status.data.tedapi_config
+    if isinstance(tedapi_config, dict):
+        for cb in (tedapi_config.get("battery_blocks") or []):
+            vin = cb.get("vin", "")
+            if "--" in vin:
+                part, serial = vin.rsplit("--", 1)
+                if serial and serial not in pw_serials:
+                    pw_serials.append(serial)
+                    config_part_map[serial] = part
+
+    # Fall back to system_status ordering (non-TEDAPI modes, or when config unavailable)
+    if not pw_serials:
+        for block in (system_status.get("battery_blocks") or []):
+            serial = block.get("PackageSerialNumber")
+            if serial and serial not in pw_serials:
+                pw_serials.append(serial)
+
+    # Last resort: derive from vitals TEPINV ordering (tepinv_map already keyed by serial)
+    if not pw_serials:
+        pw_serials = list(tepinv_map.keys())
+
+    # --- Populate per-Powerwall fields ---
+    for idx, serial in enumerate(pw_serials, 1):
+        block = ss_block_map.get(serial, {})
+        tepinv_device, tepinv_data = tepinv_map.get(serial, (None, {}))
+
+        fcv[f"PW{idx}_name"] = tepinv_device
+        # PINV frequency/voltage from vitals (preferred); fall back to system_status f_out
+        fcv[f"PW{idx}_PINV_Fout"] = (
+            tepinv_data.get("PINV_Fout") if tepinv_data else None
+        ) or block.get("f_out")
+        fcv[f"PW{idx}_PINV_VSplit1"] = tepinv_data.get("PINV_VSplit1") if tepinv_data else None
+        fcv[f"PW{idx}_PINV_VSplit2"] = tepinv_data.get("PINV_VSplit2") if tepinv_data else None
+        fcv[f"PW{idx}_PackagePartNumber"] = block.get("PackagePartNumber") or config_part_map.get(serial)
+        fcv[f"PW{idx}_PackageSerialNumber"] = serial
+        fcv[f"PW{idx}_p_out"] = block.get("p_out")
+        fcv[f"PW{idx}_q_out"] = block.get("q_out")
+        fcv[f"PW{idx}_v_out"] = block.get("v_out")
+        fcv[f"PW{idx}_f_out"] = block.get("f_out")
+        fcv[f"PW{idx}_i_out"] = block.get("i_out")
+
+    # ISLAND and METER metrics from Backup Gateway (TESYNC) or Backup Switch (TEMSA)
+    for device, d in vitals.items():
         if device.startswith("TESYNC") or device.startswith("TEMSA"):
-            # Island and Meter Metrics from Backup Gateway or Backup Switch
             for i, value in d.items():
                 if i.startswith("ISLAND") or i.startswith("METER"):
                     fcv[i] = value

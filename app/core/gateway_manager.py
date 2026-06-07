@@ -62,6 +62,7 @@ Performance:
 import asyncio
 import json
 import logging
+from copy import deepcopy
 from typing import Any, Dict, List, Optional
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
@@ -95,6 +96,7 @@ class GatewayManager:
         self._pending_configs: Dict[
             str, GatewayConfig
         ] = {}  # Gateways waiting for lazy initialization
+        self._preserve_stale_count: Dict[str, int] = {}  # Multi-PW snapshot preservation staleness tracker
 
         # Dedicated thread pool for blocking pypowerwall operations
         # Will be sized during initialize() based on gateway count
@@ -106,6 +108,129 @@ class GatewayManager:
         # alongside a TEDAPI gateway. This enables hybrid operation:
         # TEDAPI for fast local reads, cloud for control writes.
         self._cloud_control: Optional[pypowerwall.Powerwall] = None
+
+    @staticmethod
+    def _expected_battery_block_count(data: Optional[PowerwallData]) -> int:
+        """Return expected battery block count from cached TEDAPI config when available."""
+        if not data or not isinstance(data.tedapi_config, dict):
+            return 0
+        battery_blocks = data.tedapi_config.get("battery_blocks") or []
+        return len(battery_blocks) if isinstance(battery_blocks, list) else 0
+
+    @staticmethod
+    def _count_tepinv_devices(vitals: Optional[Dict[str, Any]]) -> int:
+        """Count Powerwall inverter entries in vitals payload."""
+        if not isinstance(vitals, dict):
+            return 0
+        return sum(1 for key in vitals if key.startswith("TEPINV--"))
+
+    @staticmethod
+    def _count_system_status_blocks(system_status: Optional[Dict[str, Any]]) -> int:
+        """Count battery blocks in cached system status payload."""
+        if not isinstance(system_status, dict):
+            return 0
+        battery_blocks = system_status.get("battery_blocks") or []
+        return len(battery_blocks) if isinstance(battery_blocks, list) else 0
+
+    # Max consecutive polls a preserved snapshot is promoted before letting
+    # partial data through.  Prevents stale follower data from living forever.
+    _PRESERVE_STALENESS_CAP = 3
+
+    def _preserve_complete_multi_pw_snapshot(
+        self, gateway_id: str, data: PowerwallData
+    ) -> PowerwallData:
+        """Avoid downgrading a complete multi-PW TEDAPI snapshot with a partial one.
+
+        TEDAPI multi-PW data is synthesized in pypowerwall from follower vitals.
+        If a single poll cycle drops follower data, the server can otherwise cache a
+        one-PW snapshot even though the gateway config still reports multiple blocks.
+
+        The guard is capped at ``_PRESERVE_STALENESS_CAP`` consecutive polls — after
+        that, the partial data passes through so downstream consumers see reality.
+        """
+        previous = self._last_successful_data.get(gateway_id)
+        if not previous:
+            return data
+
+        current_config_count = self._expected_battery_block_count(data)
+        previous_config_count = self._expected_battery_block_count(previous)
+
+        # Trust the current TEDAPI config when it is present and non-zero.
+        # Only fall back to the previous (larger) count when the current config
+        # is missing — that indicates a transient read failure, not a legitimate
+        # transition from multi-PW to single-PW.
+        if current_config_count > 0:
+            expected_blocks = current_config_count
+        else:
+            expected_blocks = previous_config_count
+
+        if expected_blocks < 2:
+            # Not a multi-PW system (or no longer one) — reset staleness counter.
+            self._preserve_stale_count.pop(gateway_id, None)
+            return data
+
+        # --- Staleness cap ---
+        stale_key = gateway_id
+        stale_count = self._preserve_stale_count.get(stale_key, 0)
+        if stale_count >= self._PRESERVE_STALENESS_CAP:
+            logger.warning(
+                "Preservation guard for %s hit staleness cap (%d polls) — "
+                "letting partial data through",
+                gateway_id,
+                self._PRESERVE_STALENESS_CAP,
+            )
+            self._preserve_stale_count.pop(stale_key, None)
+            return data
+
+        preserved_any = False
+
+        current_vitals_count = self._count_tepinv_devices(data.vitals)
+        previous_vitals_count = self._count_tepinv_devices(previous.vitals)
+        current_status_count = self._count_system_status_blocks(data.system_status)
+        previous_status_count = self._count_system_status_blocks(previous.system_status)
+
+        if (
+            current_vitals_count < expected_blocks
+            and previous_vitals_count >= expected_blocks
+        ):
+            logger.warning(
+                "Preserving prior complete vitals snapshot for %s: "
+                "expected %d TEPINV blocks, got %d in current poll (stale %d/%d)",
+                gateway_id,
+                expected_blocks,
+                current_vitals_count,
+                stale_count + 1,
+                self._PRESERVE_STALENESS_CAP,
+            )
+            data.vitals = deepcopy(previous.vitals)
+            preserved_any = True
+
+        if (
+            current_status_count < expected_blocks
+            and previous_status_count >= expected_blocks
+        ):
+            logger.warning(
+                "Preserving prior complete system_status snapshot for %s: "
+                "expected %d battery blocks, got %d in current poll (stale %d/%d)",
+                gateway_id,
+                expected_blocks,
+                current_status_count,
+                stale_count + 1,
+                self._PRESERVE_STALENESS_CAP,
+            )
+            data.system_status = deepcopy(previous.system_status)
+            preserved_any = True
+
+        if not data.tedapi_config and previous.tedapi_config:
+            data.tedapi_config = deepcopy(previous.tedapi_config)
+
+        if preserved_any:
+            self._preserve_stale_count[stale_key] = stale_count + 1
+        else:
+            # Current poll was complete — reset staleness.
+            self._preserve_stale_count.pop(stale_key, None)
+
+        return data
 
     async def initialize(
         self, gateway_configs: List[GatewayConfig], poll_interval: int = 5
@@ -146,6 +271,22 @@ class GatewayManager:
                         f"Invalid configuration for gateway {config.id}: need host+gw_pwd or host+rsa_key_path (TEDAPI) or email (Cloud)"
                     )
                     continue
+
+                # Warn when both gw_pwd and rsa_key_path are set alongside host.
+                # pypowerwall selects TEDAPI v1r (RSA auth) in this case, which
+                # limits follower Powerwall data to primary-only unless a wifi_host
+                # is also provided for the follower WiFi fallback path.
+                if config.host and config.gw_pwd and config.rsa_key_path and not config.wifi_host:
+                    logger.warning(
+                        "Gateway %s: PW_HOST + PW_GW_PWD + PW_RSA_KEY_PATH are "
+                        "all set — TEDAPI v1r mode is active but follower "
+                        "Powerwall data will be limited to the primary unit only. "
+                        "To see all Powerwalls, either: "
+                        "(a) set PW_WIFI_HOST=<gateway-ip> to enable WiFi fallback "
+                        "for follower queries while keeping v1r, or "
+                        "(b) remove PW_RSA_KEY_PATH to use TEDAPI WiFi mode.",
+                        config.id,
+                    )
 
                 # Auto-enable cloud_mode if email is set but no host
                 if config.email and not config.host:
@@ -381,11 +522,16 @@ class GatewayManager:
 
                     # Try to get site_id for cloud mode gateways
                     gateway = self.gateways[gateway_id]
-                    mode_label = (
-                        "FleetAPI"
-                        if gateway.fleetapi
-                        else ("Cloud" if gateway.cloud_mode else "TEDAPI")
-                    )
+                    if gateway.fleetapi:
+                        mode_label = "FleetAPI"
+                    elif gateway.cloud_mode:
+                        mode_label = "Cloud"
+                    elif config.rsa_key_path and config.wifi_host:
+                        mode_label = "TEDAPI v1r + WiFi"
+                    elif config.rsa_key_path:
+                        mode_label = "TEDAPI v1r"
+                    else:
+                        mode_label = "TEDAPI WiFi"
 
                     if gateway.cloud_mode or gateway.fleetapi:
                         try:
@@ -687,6 +833,10 @@ class GatewayManager:
                         pass
             except (asyncio.TimeoutError, Exception) as e:
                 logger.debug(f"Powerwalls not available for {gateway_id}: {e}")
+
+            # Guard against partial TEDAPI follower snapshots replacing a complete
+            # multi-Powerwall view for a single poll cycle.
+            data = self._preserve_complete_multi_pw_snapshot(gateway_id, data)
 
             # Update cache
             gateway = self.gateways[gateway_id]
