@@ -74,6 +74,15 @@ from app.config import GatewayConfig
 
 logger = logging.getLogger(__name__)
 
+# Methods that write gateway state and must not run concurrently.
+# set_operation() always writes backup_reserve_percent + real_mode together,
+# reading the field it wasn't given from the 5-second poll cache. Two
+# concurrent writes both see the same stale cache value and the last one to
+# land on the gateway clobbers whichever field it didn't own.
+_WRITE_METHODS = frozenset({
+    "set_reserve", "set_mode", "set_operation",
+    "set_grid_charging", "set_grid_export",
+})
 
 class GatewayManager:
     """Manages multiple Powerwall gateway connections."""
@@ -102,6 +111,10 @@ class GatewayManager:
         # Will be sized during initialize() based on gateway count
         self._executor: Optional[ThreadPoolExecutor] = None
 
+        # Serializes concurrent write operations to prevent set_operation()
+        # from reading stale cache when two control calls race.
+        self._write_lock: asyncio.Lock = asyncio.Lock()
+        
         # Cloud connection for control operations (set_reserve, set_mode).
         # TEDAPI doesn't support POST/write APIs, so a separate cloud-mode
         # pypowerwall instance is created when cloud credentials are available
@@ -1061,11 +1074,21 @@ class GatewayManager:
             logger.debug(
                 f"[{gateway_id}] call_api({method}) starting (timeout={timeout}s)"
             )
-            result = await asyncio.wait_for(
-                loop.run_in_executor(
-                    self._executor, lambda: method_func(*args, **kwargs)
-                ),
-                timeout=timeout,
+            if method in _WRITE_METHODS:
+                async with self._write_lock:
+                    result = await asyncio.wait_for(
+                        loop.run_in_executor(
+                            self._executor, lambda: method_func(*args, **kwargs)
+                        ),
+                        timeout=timeout,
+                    )
+            else:
+                result = await asyncio.wait_for(
+                    loop.run_in_executor(
+                        self._executor, lambda: method_func(*args, **kwargs)
+                    ),
+                    timeout=timeout,
+                )
             )
             logger.debug(f"[{gateway_id}] call_api({method}) completed successfully")
             return result
