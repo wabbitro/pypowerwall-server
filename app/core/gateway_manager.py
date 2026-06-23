@@ -48,7 +48,8 @@ Error Handling:
     - Automatic reconnection every poll cycle
 
 Thread Safety:
-    - All operations use asyncio (no threads/locks needed)
+    - All operations use asyncio (no threads/locks needed for reads)
+    - Write operations serialized via _write_lock to prevent set_operation() races
     - Single event loop handles all concurrency
     - Background task coordinated via asyncio.create_task()
     - Graceful shutdown via task cancellation
@@ -114,7 +115,7 @@ class GatewayManager:
         # Serializes concurrent write operations to prevent set_operation()
         # from reading stale cache when two control calls race.
         self._write_lock: asyncio.Lock = asyncio.Lock()
-        
+
         # Cloud connection for control operations (set_reserve, set_mode).
         # TEDAPI doesn't support POST/write APIs, so a separate cloud-mode
         # pypowerwall instance is created when cloud credentials are available
@@ -1089,7 +1090,6 @@ class GatewayManager:
                     ),
                     timeout=timeout,
                 )
-            )
             logger.debug(f"[{gateway_id}] call_api({method}) completed successfully")
             return result
         except asyncio.TimeoutError:
