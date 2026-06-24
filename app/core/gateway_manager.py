@@ -80,10 +80,15 @@ logger = logging.getLogger(__name__)
 # reading the field it wasn't given from the 5-second poll cache. Two
 # concurrent writes both see the same stale cache value and the last one to
 # land on the gateway clobbers whichever field it didn't own.
-_WRITE_METHODS = frozenset({
-    "set_reserve", "set_mode", "set_operation",
-    "set_grid_charging", "set_grid_export",
-})
+_WRITE_METHODS = frozenset(
+    {
+        "set_reserve",
+        "set_mode",
+        "set_operation",
+        "set_grid_charging",
+        "set_grid_export",
+    }
+)
 
 class GatewayManager:
     """Manages multiple Powerwall gateway connections."""
@@ -1129,12 +1134,21 @@ class GatewayManager:
         try:
             method_func = getattr(self._cloud_control, method)
             loop = asyncio.get_running_loop()
-            result = await asyncio.wait_for(
-                loop.run_in_executor(
-                    self._executor, lambda: method_func(*args, **kwargs)
-                ),
-                timeout=timeout,
-            )
+            if method in _WRITE_METHODS:
+                async with self._write_lock:
+                    result = await asyncio.wait_for(
+                        loop.run_in_executor(
+                            self._executor, lambda: method_func(*args, **kwargs)
+                        ),
+                        timeout=timeout,
+                    )
+            else:
+                result = await asyncio.wait_for(
+                    loop.run_in_executor(
+                        self._executor, lambda: method_func(*args, **kwargs)
+                    ),
+                    timeout=timeout,
+                )
             logger.info(f"cloud_control({method}) completed successfully")
             return result
         except asyncio.TimeoutError:
