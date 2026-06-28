@@ -128,7 +128,7 @@ async def control_api(
             )
         if result is None:
             raise HTTPException(
-                status_code=503, detail="Control operation failed"
+                status_code=503, detail=f"Control operation failed for {path}"
             )
         return result
 
