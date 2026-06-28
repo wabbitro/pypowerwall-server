@@ -41,31 +41,31 @@ except ImportError:
 
 
 # ---------------------------------------------------------------------------
-# Theme — dark palette
+# Theme — bright modern dark palette
 # ---------------------------------------------------------------------------
 
 T = {
-    "bg":           "#1E2228",   # window / canvas background
-    "card_bg":      "#282C34",   # gateway card background
-    "card_border":  "#3A3F4B",   # card border / divider
-    "header_bg":    "#21252B",   # card header strip
-    "bar_bg":       "#17191E",   # status bar
-    "label_fg":     "#636D83",   # dim label text
-    "value_fg":     "#ABB2BF",   # default value text
-    "title_fg":     "#E5C07B",   # app title
-    "header_fg":    "#61AFEF",   # gateway name in card header
-    "time_fg":      "#4B5263",   # last-update timestamp
-    "unit_fg":      "#4B5263",   # unit suffix
-    "sep":          "#2C313A",   # separator line
+    "bg":           "#0A0E1A",   # window / canvas background
+    "card_bg":      "#111827",   # gateway card background
+    "card_border":  "#1F2937",   # card border / divider
+    "header_bg":    "#0D1526",   # card header strip
+    "bar_bg":       "#060A12",   # status bar
+    "label_fg":     "#64748B",   # dim label text
+    "value_fg":     "#F1F5F9",   # bright default value text
+    "title_fg":     "#FBBF24",   # app title (amber)
+    "header_fg":    "#38BDF8",   # gateway name in card header (sky blue)
+    "time_fg":      "#374151",   # last-update timestamp
+    "unit_fg":      "#374151",   # unit suffix
+    "sep":          "#1E293B",   # separator line
     # value colours
-    "green":        "#98C379",
-    "yellow":       "#E5C07B",
-    "blue":         "#61AFEF",
-    "purple":       "#C678DD",
-    "orange":       "#D19A66",
-    "red":          "#E06C75",
-    "cyan":         "#56B6C2",
-    "grey":         "#5C6370",
+    "green":        "#4ADE80",
+    "yellow":       "#FACC15",
+    "blue":         "#38BDF8",
+    "purple":       "#C084FC",
+    "orange":       "#FB923C",
+    "red":          "#F87171",
+    "cyan":         "#22D3EE",
+    "grey":         "#4B5563",
 }
 
 # (label, unit, color-key, formatter)
@@ -74,8 +74,8 @@ SENSORS: list[tuple[str, str, str, str, str]] = [
     # key            label          unit   color      fmt
     ("battery",      "Battery",     "%",   "green",   "pct"),
     ("solar",        "Solar",       "W",   "yellow",  "watt"),
-    ("grid",         "Grid",        "W",   "blue",    "watt"),
-    ("home",         "Home Load",   "W",   "purple",  "watt"),
+    ("grid",         "Grid",        "W",   "purple",  "watt"),
+    ("home",         "Home Load",   "W",   "blue",    "watt"),
     ("powerwall",    "Powerwall",   "W",   "orange",  "watt"),
     ("reserve",      "Reserve",     "%",   "cyan",    "pct"),
     ("grid_status",  "Grid Status", "",    "value_fg","text"),
