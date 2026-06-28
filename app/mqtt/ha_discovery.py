@@ -53,8 +53,6 @@ from typing import Optional, Sequence
 
 logger = logging.getLogger(__name__)
 
-logger = logging.getLogger(__name__)
-
 
 def _device_block(gateway_id: str, gateway_name: str, version: Optional[str]) -> dict:
     """Build the shared HA device block for all sensors on this gateway."""

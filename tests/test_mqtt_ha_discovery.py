@@ -207,7 +207,7 @@ class TestBuildDiscoveryPayloads:
             topic_prefix="pypowerwall",
             ha_prefix="homeassistant",
         )
-        string_topics = [t for t, _ in results if "/string_" in t]
+        string_topics = [t for t, _ in results if "_string_" in t]
         assert string_topics == []
         assert len(results) == 11
 
