@@ -808,10 +808,12 @@ class GatewayManager:
                 logger.debug(f"System status not available for {gateway_id}: {e}")
 
             # Try to get fan speeds for /fans endpoint (TEDAPI only)
+            # get_fan_speeds() lives on the TEDAPI client (pw.tedapi),
+            # not on the top-level Powerwall object itself
             try:
-                if hasattr(pw, "get_fan_speeds"):
+                if pw.tedapi and hasattr(pw.tedapi, "get_fan_speeds"):
                     data.fan_speeds = await asyncio.wait_for(
-                        loop.run_in_executor(self._executor, pw.get_fan_speeds),
+                        loop.run_in_executor(self._executor, pw.tedapi.get_fan_speeds),
                         timeout=5.0,
                     )
             except (asyncio.TimeoutError, Exception) as e:
