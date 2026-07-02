@@ -326,8 +326,86 @@ class Settings(BaseSettings):
                 self.cache_file = "/tmp/.powerwall"
         self._initialize_gateways()
 
+    def _load_config_file(self) -> bool:
+        """Load gateway (and optional server) config from a PW_CONFIG file.
+
+        Supports the YAML format documented in the README (JSON works too —
+        it is a subset of YAML).  Expected structure:
+
+            server:            # optional
+              host: 0.0.0.0
+              port: 8675
+              cors_origins: [...]
+            gateways:
+              - id: home
+                host: 192.168.91.1
+                gw_pwd: ...
+
+        Returns True when PW_CONFIG is set (the file takes precedence over
+        PW_GATEWAYS / legacy env config, even if it fails to parse — a broken
+        file must not silently reconfigure the server to a different mode).
+        """
+        config_path = os.getenv("PW_CONFIG")
+        if not config_path:
+            return False
+
+        self.gateways = []
+        try:
+            import yaml
+
+            with open(config_path) as f:
+                doc = yaml.safe_load(f)
+        except Exception as e:
+            logger.error(
+                f"Failed to read PW_CONFIG file {config_path}: {e} - "
+                "no gateways configured"
+            )
+            return True
+
+        if not isinstance(doc, dict):
+            logger.error(
+                f"PW_CONFIG file {config_path} must contain a mapping with a "
+                "'gateways' list - no gateways configured"
+            )
+            return True
+
+        server = doc.get("server")
+        if isinstance(server, dict):
+            if "host" in server:
+                self.server_host = str(server["host"])
+            if "port" in server:
+                self.server_port = int(server["port"])
+            if isinstance(server.get("cors_origins"), list):
+                self.cors_origins = [str(o) for o in server["cors_origins"]]
+
+        entries = doc.get("gateways")
+        if not isinstance(entries, list):
+            logger.error(
+                f"PW_CONFIG file {config_path} has no 'gateways' list - "
+                "no gateways configured"
+            )
+            return True
+
+        for idx, gw in enumerate(entries):
+            try:
+                self.gateways.append(GatewayConfig(**gw))
+            except Exception as e:
+                logger.error(
+                    f"Skipping invalid gateway entry {idx} in {config_path} "
+                    f"(id={gw.get('id', '?') if isinstance(gw, dict) else '?'}): {e}"
+                )
+        if not self.gateways:
+            logger.error(
+                f"PW_CONFIG file {config_path} contained no valid gateway entries"
+            )
+        return True
+
     def _initialize_gateways(self):
-        """Initialize gateway configurations from environment variables."""
+        """Initialize gateway configurations from PW_CONFIG file or environment variables."""
+        # Config file (--config / PW_CONFIG) takes precedence
+        if self._load_config_file():
+            return
+
         # Try to load from PW_GATEWAYS JSON
         gateways_json = os.getenv("PW_GATEWAYS")
         if gateways_json:

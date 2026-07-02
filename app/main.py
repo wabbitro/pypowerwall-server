@@ -678,7 +678,7 @@ def cli():
         pypowerwall-server
         pypowerwall-server --host 192.168.91.1 --gw-pwd mypassword
         pypowerwall-server --port 8080 --debug
-        pypowerwall-server --config /path/to/config.json
+        pypowerwall-server --config /path/to/gateways.yaml
     """
     import argparse
     import sys
@@ -700,7 +700,7 @@ Environment Variables:
   PW_DEBUG           Enable debug logging (default: false)
   PW_PORT            Server port (default: 8675)
   PW_BIND_ADDRESS    Server bind address (default: 0.0.0.0)
-  PW_CONFIG          Path to JSON configuration file
+  PW_CONFIG          Path to YAML/JSON configuration file
   
 For more information, visit: https://github.com/jasonacox/pypowerwall-server
         """,
@@ -728,7 +728,7 @@ For more information, visit: https://github.com/jasonacox/pypowerwall-server
         help="Server bind address (default: 0.0.0.0)",
     )
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
-    parser.add_argument("--config", help="Path to JSON configuration file")
+    parser.add_argument("--config", help="Path to YAML/JSON configuration file")
     parser.add_argument(
         "--reload", action="store_true", help="Enable auto-reload for development"
     )
