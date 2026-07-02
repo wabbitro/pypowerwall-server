@@ -148,10 +148,13 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # Shutdown
+    # Shutdown.  Order matters: stop polling first (so nothing new is
+    # scheduled), then flush per-gateway offline states while the MQTT
+    # connection is still alive, then disconnect from the broker.
     logger.info("Shutting down PyPowerwall Server...")
-    await mqtt_publisher.stop()
     await gateway_manager.shutdown()
+    await mqtt_publisher.publish_offline(list(gateway_manager.gateways))
+    await mqtt_publisher.stop()
 
 
 # Normalize PROXY_BASE_URL: strip trailing slash, keep leading slash (or empty string)

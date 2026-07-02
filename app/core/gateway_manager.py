@@ -6,8 +6,8 @@ performs background polling, caches data, and provides fast API responses.
 
 Architecture:
     - Singleton pattern (single gateway_manager instance)
-    - Background polling task runs every PW_CACHE_EXPIRE seconds (default: 5s)
-    - Concurrent polling of all gateways using asyncio.gather
+    - Background polling every PW_CACHE_EXPIRE seconds (default: 5s)
+    - One independent poll task per gateway (slow gateways don't delay others)
     - Cached data for instant API responses without blocking
     - Automatic reconnection on failure
 
@@ -103,8 +103,19 @@ class GatewayManager:
         self.gateways: Dict[str, Gateway] = {}
         self.connections: Dict[str, pypowerwall.Powerwall] = {}
         self.cache: Dict[str, GatewayStatus] = {}
-        self._poll_task: Optional[asyncio.Task] = None
+        # One independent poll task per gateway so a slow/degraded gateway
+        # never delays polling of the healthy ones.
+        self._poll_tasks: Dict[str, asyncio.Task] = {}
         self._poll_interval = 5  # Default, will be set from config during initialize()
+
+        # Strong references to in-flight MQTT publish tasks (one per gateway).
+        # The event loop only holds weak refs to tasks, so fire-and-forget
+        # tasks could be garbage-collected mid-publish; keeping them here also
+        # lets us coalesce (latest-wins) and cancel them on shutdown.
+        self._mqtt_tasks: Dict[str, asyncio.Task] = {}
+
+        # Background cloud-control connection task (created in initialize()).
+        self._cloud_control_task: Optional[asyncio.Task] = None
 
         # Exponential backoff tracking per gateway
         self._consecutive_failures: Dict[str, int] = {}  # Track failure count
@@ -361,92 +372,402 @@ class GatewayManager:
 
         # Initialize cloud control connection for TEDAPI gateways with cloud credentials.
         # This enables hybrid operation: local TEDAPI reads + cloud control writes.
-        from app.config import settings
-        for config in gateway_configs:
-            if config.host and config.gw_pwd and config.email and not config.cloud_mode:
-                try:
-                    authpath = config.authpath or settings.pw_authpath or ""
-                    loop = asyncio.get_running_loop()
-                    cloud_kwargs = {
-                        "email": config.email,
-                        "authpath": authpath,
-                        "cachefile": "/tmp/.powerwall.cloud",
-                        "timezone": config.timezone,
-                        "fleetapi": config.fleetapi,
-                        "auto_select": True,
-                    }
-                    self._cloud_control = await asyncio.wait_for(
-                        loop.run_in_executor(
-                            self._executor,
-                            lambda kw=cloud_kwargs: pypowerwall.Powerwall(**kw),
-                        ),
-                        timeout=15.0,
-                    )
-                    logger.info(
-                        "Cloud control connection established for write operations"
-                    )
-                    break  # Only need one cloud control connection
-                except Exception as e:
-                    logger.warning(
-                        f"Cloud control connection failed (control will be unavailable): {e}"
-                    )
+        # Runs as a background task so a slow/flaky Tesla cloud connection (up
+        # to 15s) doesn't block server startup and container health checks.
+        hybrid_configs = [
+            config
+            for config in gateway_configs
+            if config.host and config.gw_pwd and config.email and not config.cloud_mode
+        ]
+        if hybrid_configs:
+            self._cloud_control_task = asyncio.create_task(
+                self._init_cloud_control(hybrid_configs), name="cloud-control-init"
+            )
 
-        # Start polling task
+        # Start one independent polling task per gateway.  A degraded gateway
+        # (each optional fetch timing out) can take a long time per cycle;
+        # with a shared cycle barrier that used to stall data for the healthy
+        # gateways too.
+        for gateway_id in self.gateways:
+            self._poll_tasks[gateway_id] = asyncio.create_task(
+                self._poll_gateway_loop(gateway_id), name=f"poll-{gateway_id}"
+            )
         if self.gateways:
-            self._poll_task = asyncio.create_task(self._poll_gateways())
             logger.info(
                 f"Gateway manager ready - {len(self.gateways)} gateway(s) will connect on first poll"
             )
 
+    async def _init_cloud_control(self, hybrid_configs: List[GatewayConfig]):
+        """Create the hybrid cloud-control connection in the background."""
+        from app.config import settings
+
+        for config in hybrid_configs:
+            try:
+                authpath = config.authpath or settings.pw_authpath or ""
+                loop = asyncio.get_running_loop()
+                cloud_kwargs = {
+                    "email": config.email,
+                    "authpath": authpath,
+                    "cachefile": "/tmp/.powerwall.cloud",
+                    "timezone": config.timezone,
+                    "fleetapi": config.fleetapi,
+                    "auto_select": True,
+                }
+                self._cloud_control = await asyncio.wait_for(
+                    loop.run_in_executor(
+                        self._executor,
+                        lambda kw=cloud_kwargs: pypowerwall.Powerwall(**kw),
+                    ),
+                    timeout=15.0,
+                )
+                logger.info(
+                    "Cloud control connection established for write operations"
+                )
+                return  # Only need one cloud control connection
+            except Exception as e:
+                logger.warning(
+                    f"Cloud control connection failed (control will be unavailable): {e}"
+                )
+
     async def shutdown(self):
         """Shutdown gateway manager and cleanup resources."""
-        if self._poll_task:
-            self._poll_task.cancel()
+        # Stop polling first so no new MQTT publishes are scheduled,
+        # then cancel any in-flight publish tasks.
+        tasks = list(self._poll_tasks.values())
+        if self._cloud_control_task:
+            tasks.append(self._cloud_control_task)
+        tasks.extend(self._mqtt_tasks.values())
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
             try:
-                await self._poll_task
+                await task
             except asyncio.CancelledError:
-                # Expected when cancelling the polling task during shutdown
                 pass
+            except Exception as e:
+                logger.debug(f"Task error during shutdown: {e}")
+        self._poll_tasks.clear()
+        self._mqtt_tasks.clear()
 
         # Shutdown thread pool executor
         if self._executor:
             self._executor.shutdown(wait=False)
         logger.info("Gateway manager shutdown complete")
 
-    async def _poll_gateways(self):
-        """Background task to poll all gateways on a fixed cadence.
+    async def _poll_gateway_loop(self, gateway_id: str):
+        """Fixed-tick polling loop for a single gateway.
 
-        Uses a fixed-tick scheduling pattern to ensure consistent poll-to-poll
-        intervals regardless of how long the actual poll takes. With the previous
-        sleep-after-poll approach the effective interval was poll_duration + sleep,
-        causing drift (e.g. ~8-9s actual interval when PW_CACHE_EXPIRE=5).
-
-        The loop records the monotonic clock time (via ``loop.time()``) at the
-        start of each cycle and only sleeps for the *remaining* time after all
-        gateways have been polled, so the next cycle starts as close to the
-        configured interval as possible.
+        Each gateway gets its own task so one slow gateway never delays the
+        others.  The loop records the monotonic clock time at the start of
+        each cycle and only sleeps for the *remaining* time after the poll,
+        so the next cycle starts as close to the configured interval as
+        possible (a sleep-after-poll approach would drift by poll duration).
         """
         while True:
             try:
                 loop = asyncio.get_running_loop()
                 loop_start = loop.time()
-
-                # Poll all gateways concurrently
-                tasks = [
-                    self._poll_gateway(gateway_id)
-                    for gateway_id in self.gateways.keys()
-                ]
-                await asyncio.gather(*tasks, return_exceptions=True)
-
-                # Sleep only the remaining time to maintain fixed interval
+                await self._poll_gateway(gateway_id)
                 elapsed = loop.time() - loop_start
-                sleep_time = max(0, self._poll_interval - elapsed)
-                await asyncio.sleep(sleep_time)
+                await asyncio.sleep(max(0, self._poll_interval - elapsed))
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f"Error in polling task: {e}")
+                logger.error(f"Error in polling task for {gateway_id}: {e}")
                 await asyncio.sleep(self._poll_interval)
+
+    async def _fetch_gateway_data(self, gateway_id: str, pw) -> PowerwallData:
+        """Fetch all data fields from a connected gateway.
+
+        Runs every blocking pypowerwall call in the dedicated executor with a
+        per-step timeout.  Aggregates is required (raises on failure); all
+        other fields are optional and degrade to None.
+
+        Per-step timeouts must exceed pypowerwall's internal request timeout
+        (settings.timeout) so the library times out first and returns
+        cleanly.  When wait_for gives up before the library does, the thread
+        keeps running and holds pypowerwall's per-function API lock, which
+        cascades into lock-wait timeouts on every subsequent call.
+        """
+        from app.config import settings
+
+        step_timeout = max(5.0, settings.timeout + 2.0)
+        long_timeout = max(10.0, settings.timeout + 2.0)
+
+        # Run blocking pypowerwall calls in dedicated executor with timeout protection
+        loop = asyncio.get_running_loop()
+
+        # Fetch core data - aggregates is required, vitals/strings are optional
+        # Use asyncio.wait_for to timeout if pypowerwall hangs
+        try:
+            aggregates = await asyncio.wait_for(
+                loop.run_in_executor(
+                    self._executor, pw.poll, "/api/meters/aggregates"
+                ),
+                timeout=long_timeout,
+            )
+        except asyncio.TimeoutError:
+            raise Exception(f"Timeout fetching aggregates from {gateway_id}")
+        except Exception as e:
+            # If we can't get aggregates, this is a real connection failure
+            raise Exception(f"Failed to fetch aggregates: {e}")
+
+        # pypowerwall signals connection failure by RETURNING None (or an
+        # ERROR payload), not by raising.  Without this check a dead
+        # gateway would be marked online with empty data, resetting the
+        # backoff and clobbering the last-known-good snapshot.
+        if not aggregates or (
+            isinstance(aggregates, dict) and "ERROR" in aggregates
+        ):
+            raise Exception(f"No aggregates data from {gateway_id}")
+
+        # Apply negative solar correction if configured (PW_NEG_SOLAR=no)
+        # This is done at fetch time so all endpoints get consistent data
+        from app.config import settings
+
+        if aggregates and not settings.neg_solar:
+            solar_power = aggregates.get("solar", {}).get("instant_power", 0)
+            if solar_power < 0:
+                # Shift negative solar energy to load
+                if "load" in aggregates and "instant_power" in aggregates["load"]:
+                    aggregates["load"]["instant_power"] -= solar_power
+                # Clamp solar to 0
+                if "solar" in aggregates:
+                    aggregates["solar"]["instant_power"] = 0
+                logger.debug(
+                    f"Applied neg_solar correction for {gateway_id}: solar clamped to 0"
+                )
+
+        # Build PowerwallData with required aggregates
+        data = PowerwallData(
+            aggregates=aggregates, timestamp=datetime.now().timestamp()
+        )
+
+        # Try to get optional vitals and strings (don't fail if these aren't available)
+        try:
+            data.vitals = await asyncio.wait_for(
+                loop.run_in_executor(self._executor, pw.vitals), timeout=long_timeout
+            )
+        except (asyncio.TimeoutError, Exception) as e:
+            logger.debug(f"Vitals not available for {gateway_id}: {e}")
+
+        try:
+            data.strings = await asyncio.wait_for(
+                loop.run_in_executor(self._executor, pw.strings), timeout=long_timeout
+            )
+        except (asyncio.TimeoutError, Exception) as e:
+            logger.debug(f"Strings not available for {gateway_id}: {e}")
+
+        # Try to get additional data
+        try:
+            data.soe_raw = await asyncio.wait_for(
+                loop.run_in_executor(self._executor, pw.level), timeout=step_timeout
+            )
+            data.soe = raw_to_tesla_battery_percent(data.soe_raw)
+        except (asyncio.TimeoutError, Exception) as e:
+            logger.debug(f"SOE not available for {gateway_id}: {e}")
+
+        try:
+            data.freq = await asyncio.wait_for(
+                loop.run_in_executor(self._executor, pw.freq), timeout=step_timeout
+            )
+        except (asyncio.TimeoutError, Exception) as e:
+            logger.debug(f"Frequency not available for {gateway_id}: {e}")
+
+        try:
+            data.status = await asyncio.wait_for(
+                loop.run_in_executor(self._executor, pw.status), timeout=step_timeout
+            )
+        except (asyncio.TimeoutError, Exception) as e:
+            logger.debug(f"Status not available for {gateway_id}: {e}")
+
+        try:
+            data.version = await asyncio.wait_for(
+                loop.run_in_executor(self._executor, pw.version), timeout=step_timeout
+            )
+        except (asyncio.TimeoutError, Exception) as e:
+            logger.debug(f"Version not available for {gateway_id}: {e}")
+
+        try:
+            data.din = await asyncio.wait_for(
+                loop.run_in_executor(self._executor, pw.din), timeout=step_timeout
+            )
+        except (asyncio.TimeoutError, Exception) as e:
+            logger.debug(f"DIN not available for {gateway_id}: {e}")
+
+        try:
+            data.uptime = await asyncio.wait_for(
+                loop.run_in_executor(self._executor, pw.uptime), timeout=step_timeout
+            )
+        except (asyncio.TimeoutError, Exception) as e:
+            logger.debug(f"Uptime not available for {gateway_id}: {e}")
+
+        logger.debug(f"Gateway {gateway_id} aggregates: {data.aggregates}")
+
+        # Try to get alerts (for caching)
+        try:
+            data.alerts = await asyncio.wait_for(
+                loop.run_in_executor(self._executor, pw.alerts), timeout=step_timeout
+            )
+        except (asyncio.TimeoutError, Exception) as e:
+            logger.debug(f"Alerts not available for {gateway_id}: {e}")
+
+        # Try to get temps (for caching)
+        try:
+            data.temps = await asyncio.wait_for(
+                loop.run_in_executor(self._executor, pw.temps), timeout=step_timeout
+            )
+        except (asyncio.TimeoutError, Exception) as e:
+            logger.debug(f"Temps not available for {gateway_id}: {e}")
+
+        # Try to get site name (for caching)
+        try:
+            data.site_name = await asyncio.wait_for(
+                loop.run_in_executor(self._executor, pw.site_name), timeout=step_timeout
+            )
+        except (asyncio.TimeoutError, Exception) as e:
+            logger.debug(f"Site name not available for {gateway_id}: {e}")
+
+        # Detect PW3 status from pypowerwall TEDAPI connection
+        try:
+            if hasattr(pw, "tedapi") and pw.tedapi:
+                pw3_status = getattr(pw.tedapi, "pw3", None)
+                if pw3_status is not None:
+                    data.pw3 = bool(pw3_status)
+                # Also cache tedapi_mode
+                if hasattr(pw, "tedapi_mode"):
+                    data.tedapi_mode = pw.tedapi_mode
+        except Exception:
+            pass
+
+        # Cache TEDAPI config for battery block type enrichment (PW3 systems)
+        # battery_blocks[].type gives "Powerwall3" / "Powerwall3Follower" etc.,
+        # which is more useful for model detection than system_status Type ("ACPW").
+        try:
+            if hasattr(pw, "tedapi") and pw.tedapi and hasattr(pw.tedapi, "get_config"):
+                tedapi_config = await asyncio.wait_for(
+                    loop.run_in_executor(self._executor, pw.tedapi.get_config),
+                    timeout=long_timeout,
+                )
+                if tedapi_config and isinstance(tedapi_config, dict):
+                    data.tedapi_config = tedapi_config
+        except (asyncio.TimeoutError, Exception) as e:
+            logger.debug(f"TEDAPI config not available for {gateway_id}: {e}")
+
+        # Try to get grid status (for caching)
+        try:
+            data.grid_status = await asyncio.wait_for(
+                loop.run_in_executor(self._executor, pw.grid_status), timeout=step_timeout
+            )
+        except (asyncio.TimeoutError, Exception) as e:
+            logger.debug(f"Grid status not available for {gateway_id}: {e}")
+
+        # Try to get detailed grid status from API (for /api/system_status/grid_status endpoint)
+        try:
+            grid_status_response = await asyncio.wait_for(
+                loop.run_in_executor(
+                    self._executor, pw.poll, "/api/system_status/grid_status"
+                ),
+                timeout=step_timeout,
+            )
+            if isinstance(grid_status_response, str):
+                data.grid_status_detail = json.loads(grid_status_response)
+            else:
+                data.grid_status_detail = grid_status_response
+        except (asyncio.TimeoutError, Exception) as e:
+            logger.debug(f"Grid status detail not available for {gateway_id}: {e}")
+
+        # Try to get operation mode (for /api/operation endpoint)
+        # Mode can be "self_consumption", "backup", or "autonomous" (time-based control).
+        # This is fetched from /api/operation on the gateway via pw.get_mode() and
+        # must be polled on every cycle so that mode changes made in the Tesla app
+        # are reflected promptly (fixes issue #14).
+        # Pre-fill from last known good value so a transient failure doesn't wipe the cache.
+        last_data = self._last_successful_data.get(gateway_id)
+        if last_data and last_data.mode:
+            data.mode = last_data.mode
+        try:
+            data.mode = await asyncio.wait_for(
+                loop.run_in_executor(self._executor, pw.get_mode),
+                timeout=step_timeout,
+            )
+        except (asyncio.TimeoutError, Exception) as e:
+            logger.debug(f"Operation mode not available for {gateway_id}: {e}")
+
+        # Try to get reserve and time remaining (for caching)
+        try:
+            # Request the Tesla App scaled reserve setting (scale=True)
+            data.reserve = await asyncio.wait_for(
+                loop.run_in_executor(self._executor, lambda: pw.get_reserve(scale=True)), timeout=step_timeout
+            )
+            data.time_remaining = await asyncio.wait_for(
+                loop.run_in_executor(self._executor, pw.get_time_remaining),
+                timeout=step_timeout,
+            )
+        except (asyncio.TimeoutError, Exception) as e:
+            logger.debug(
+                f"Reserve/time remaining not available for {gateway_id}: {e}"
+            )
+
+        # Try to get system status for /pod endpoint (for caching)
+        try:
+            data.system_status = await asyncio.wait_for(
+                loop.run_in_executor(self._executor, pw.system_status), timeout=step_timeout
+            )
+        except (asyncio.TimeoutError, Exception) as e:
+            logger.debug(f"System status not available for {gateway_id}: {e}")
+
+        # Try to get fan speeds for /fans endpoint (TEDAPI only)
+        # get_fan_speeds() lives on the TEDAPI client (pw.tedapi),
+        # not on the top-level Powerwall object itself
+        try:
+            if hasattr(pw, "tedapi") and pw.tedapi and hasattr(pw.tedapi, "get_fan_speeds"):
+                data.fan_speeds = await asyncio.wait_for(
+                    loop.run_in_executor(self._executor, pw.tedapi.get_fan_speeds),
+                    timeout=step_timeout,
+                )
+        except (asyncio.TimeoutError, Exception) as e:
+            logger.debug(f"Fan speeds not available for {gateway_id}: {e}")
+
+        # Try to get networks for /api/system/networks endpoint
+        try:
+            networks_result = await asyncio.wait_for(
+                loop.run_in_executor(
+                    self._executor, lambda: pw.poll("/api/networks")
+                ),
+                timeout=step_timeout,
+            )
+            if networks_result and isinstance(networks_result, list):
+                data.networks = networks_result
+            elif networks_result and isinstance(networks_result, str):
+                try:
+                    data.networks = json.loads(networks_result)
+                except json.JSONDecodeError:
+                    pass
+        except (asyncio.TimeoutError, Exception) as e:
+            logger.debug(f"Networks not available for {gateway_id}: {e}")
+
+        # Try to get powerwalls for /api/powerwalls endpoint
+        try:
+            powerwalls_result = await asyncio.wait_for(
+                loop.run_in_executor(
+                    self._executor, lambda: pw.poll("/api/powerwalls")
+                ),
+                timeout=step_timeout,
+            )
+            if powerwalls_result and isinstance(powerwalls_result, dict):
+                data.powerwalls = powerwalls_result
+            elif powerwalls_result and isinstance(powerwalls_result, str):
+                try:
+                    data.powerwalls = json.loads(powerwalls_result)
+                except json.JSONDecodeError:
+                    pass
+        except (asyncio.TimeoutError, Exception) as e:
+            logger.debug(f"Powerwalls not available for {gateway_id}: {e}")
+
+        # Guard against partial TEDAPI follower snapshots replacing a complete
+        # multi-Powerwall view for a single poll cycle.
+        return self._preserve_complete_multi_pw_snapshot(gateway_id, data)
 
     async def _poll_gateway(self, gateway_id: str) -> None:
         """Poll a single gateway for data with exponential backoff on failures."""
@@ -475,12 +796,18 @@ class GatewayManager:
                 loop = asyncio.get_running_loop()
 
                 try:
+                    # Keep pypowerwall's internal cache alive for the whole
+                    # poll cycle: with the library default of 5s, a cycle that
+                    # takes longer re-fetches mid-cycle data it already has.
+                    pwcacheexpire = max(5, int(self._poll_interval))
+
                     if config.cloud_mode and config.email:
                         cloud_kwargs = {
                             "email": config.email,
                             "cloudmode": True,
                             "fleetapi": config.fleetapi,
                             "timezone": config.timezone,
+                            "pwcacheexpire": pwcacheexpire,
                         }
                         if config.authpath:
                             cloud_kwargs["authpath"] = config.authpath
@@ -511,6 +838,7 @@ class GatewayManager:
                             "timezone": config.timezone,
                             "timeout": settings.timeout,
                             "poolmaxsize": settings.pool_maxsize,
+                            "pwcacheexpire": pwcacheexpire,
                         }
                         if settings.pw_password:
                             tedapi_kwargs["password"] = settings.pw_password
@@ -599,280 +927,25 @@ class GatewayManager:
                 )
                 raise Exception("Connection not yet initialized")
 
-            # Run blocking pypowerwall calls in dedicated executor with timeout protection
-            loop = asyncio.get_running_loop()
-
-            # Fetch core data - aggregates is required, vitals/strings are optional
-            # Use asyncio.wait_for to timeout if pypowerwall hangs
-            try:
-                aggregates = await asyncio.wait_for(
-                    loop.run_in_executor(
-                        self._executor, pw.poll, "/api/meters/aggregates"
-                    ),
-                    timeout=10.0,  # 10 second timeout
-                )
-            except asyncio.TimeoutError:
-                raise Exception(f"Timeout fetching aggregates from {gateway_id}")
-            except Exception as e:
-                # If we can't get aggregates, this is a real connection failure
-                raise Exception(f"Failed to fetch aggregates: {e}")
-
-            # pypowerwall signals connection failure by RETURNING None (or an
-            # ERROR payload), not by raising.  Without this check a dead
-            # gateway would be marked online with empty data, resetting the
-            # backoff and clobbering the last-known-good snapshot.
-            if not aggregates or (
-                isinstance(aggregates, dict) and "ERROR" in aggregates
-            ):
-                raise Exception(f"No aggregates data from {gateway_id}")
-
-            # Apply negative solar correction if configured (PW_NEG_SOLAR=no)
-            # This is done at fetch time so all endpoints get consistent data
+            # Cap the whole fetch with an overall budget.  ~20 sequential
+            # per-step timeouts can otherwise sum to minutes, and a degraded
+            # gateway that answers aggregates but crawls through the optional
+            # fields would stretch its poll cycle indefinitely without ever
+            # triggering backoff.  Exceeding the budget is a poll failure.
             from app.config import settings
 
-            if aggregates and not settings.neg_solar:
-                solar_power = aggregates.get("solar", {}).get("instant_power", 0)
-                if solar_power < 0:
-                    # Shift negative solar energy to load
-                    if "load" in aggregates and "instant_power" in aggregates["load"]:
-                        aggregates["load"]["instant_power"] -= solar_power
-                    # Clamp solar to 0
-                    if "solar" in aggregates:
-                        aggregates["solar"]["instant_power"] = 0
-                    logger.debug(
-                        f"Applied neg_solar correction for {gateway_id}: solar clamped to 0"
-                    )
-
-            # Build PowerwallData with required aggregates
-            data = PowerwallData(
-                aggregates=aggregates, timestamp=datetime.now().timestamp()
+            poll_budget = max(
+                30.0, self._poll_interval * 3.0, (settings.timeout + 2.0) * 4.0
             )
-
-            # Try to get optional vitals and strings (don't fail if these aren't available)
             try:
-                data.vitals = await asyncio.wait_for(
-                    loop.run_in_executor(self._executor, pw.vitals), timeout=10.0
+                data = await asyncio.wait_for(
+                    self._fetch_gateway_data(gateway_id, pw), timeout=poll_budget
                 )
-            except (asyncio.TimeoutError, Exception) as e:
-                logger.debug(f"Vitals not available for {gateway_id}: {e}")
-
-            try:
-                data.strings = await asyncio.wait_for(
-                    loop.run_in_executor(self._executor, pw.strings), timeout=10.0
-                )
-            except (asyncio.TimeoutError, Exception) as e:
-                logger.debug(f"Strings not available for {gateway_id}: {e}")
-
-            # Try to get additional data
-            try:
-                data.soe_raw = await asyncio.wait_for(
-                    loop.run_in_executor(self._executor, pw.level), timeout=5.0
-                )
-                data.soe = raw_to_tesla_battery_percent(data.soe_raw)
-            except (asyncio.TimeoutError, Exception) as e:
-                logger.debug(f"SOE not available for {gateway_id}: {e}")
-
-            try:
-                data.freq = await asyncio.wait_for(
-                    loop.run_in_executor(self._executor, pw.freq), timeout=5.0
-                )
-            except (asyncio.TimeoutError, Exception) as e:
-                logger.debug(f"Frequency not available for {gateway_id}: {e}")
-
-            try:
-                data.status = await asyncio.wait_for(
-                    loop.run_in_executor(self._executor, pw.status), timeout=5.0
-                )
-            except (asyncio.TimeoutError, Exception) as e:
-                logger.debug(f"Status not available for {gateway_id}: {e}")
-
-            try:
-                data.version = await asyncio.wait_for(
-                    loop.run_in_executor(self._executor, pw.version), timeout=5.0
-                )
-            except (asyncio.TimeoutError, Exception) as e:
-                logger.debug(f"Version not available for {gateway_id}: {e}")
-
-            try:
-                data.din = await asyncio.wait_for(
-                    loop.run_in_executor(self._executor, pw.din), timeout=5.0
-                )
-            except (asyncio.TimeoutError, Exception) as e:
-                logger.debug(f"DIN not available for {gateway_id}: {e}")
-
-            try:
-                data.uptime = await asyncio.wait_for(
-                    loop.run_in_executor(self._executor, pw.uptime), timeout=5.0
-                )
-            except (asyncio.TimeoutError, Exception) as e:
-                logger.debug(f"Uptime not available for {gateway_id}: {e}")
-
-            logger.debug(f"Gateway {gateway_id} aggregates: {data.aggregates}")
-
-            # Try to get alerts (for caching)
-            try:
-                data.alerts = await asyncio.wait_for(
-                    loop.run_in_executor(self._executor, pw.alerts), timeout=5.0
-                )
-            except (asyncio.TimeoutError, Exception) as e:
-                logger.debug(f"Alerts not available for {gateway_id}: {e}")
-
-            # Try to get temps (for caching)
-            try:
-                data.temps = await asyncio.wait_for(
-                    loop.run_in_executor(self._executor, pw.temps), timeout=5.0
-                )
-            except (asyncio.TimeoutError, Exception) as e:
-                logger.debug(f"Temps not available for {gateway_id}: {e}")
-
-            # Try to get site name (for caching)
-            try:
-                data.site_name = await asyncio.wait_for(
-                    loop.run_in_executor(self._executor, pw.site_name), timeout=5.0
-                )
-            except (asyncio.TimeoutError, Exception) as e:
-                logger.debug(f"Site name not available for {gateway_id}: {e}")
-
-            # Detect PW3 status from pypowerwall TEDAPI connection
-            try:
-                if hasattr(pw, "tedapi") and pw.tedapi:
-                    pw3_status = getattr(pw.tedapi, "pw3", None)
-                    if pw3_status is not None:
-                        data.pw3 = bool(pw3_status)
-                    # Also cache tedapi_mode
-                    if hasattr(pw, "tedapi_mode"):
-                        data.tedapi_mode = pw.tedapi_mode
-            except Exception:
-                pass
-
-            # Cache TEDAPI config for battery block type enrichment (PW3 systems)
-            # battery_blocks[].type gives "Powerwall3" / "Powerwall3Follower" etc.,
-            # which is more useful for model detection than system_status Type ("ACPW").
-            try:
-                if hasattr(pw, "tedapi") and pw.tedapi and hasattr(pw.tedapi, "get_config"):
-                    tedapi_config = await asyncio.wait_for(
-                        loop.run_in_executor(self._executor, pw.tedapi.get_config),
-                        timeout=10.0,
-                    )
-                    if tedapi_config and isinstance(tedapi_config, dict):
-                        data.tedapi_config = tedapi_config
-            except (asyncio.TimeoutError, Exception) as e:
-                logger.debug(f"TEDAPI config not available for {gateway_id}: {e}")
-
-            # Try to get grid status (for caching)
-            try:
-                data.grid_status = await asyncio.wait_for(
-                    loop.run_in_executor(self._executor, pw.grid_status), timeout=5.0
-                )
-            except (asyncio.TimeoutError, Exception) as e:
-                logger.debug(f"Grid status not available for {gateway_id}: {e}")
-
-            # Try to get detailed grid status from API (for /api/system_status/grid_status endpoint)
-            try:
-                grid_status_response = await asyncio.wait_for(
-                    loop.run_in_executor(
-                        self._executor, pw.poll, "/api/system_status/grid_status"
-                    ),
-                    timeout=5.0,
-                )
-                if isinstance(grid_status_response, str):
-                    data.grid_status_detail = json.loads(grid_status_response)
-                else:
-                    data.grid_status_detail = grid_status_response
-            except (asyncio.TimeoutError, Exception) as e:
-                logger.debug(f"Grid status detail not available for {gateway_id}: {e}")
-
-            # Try to get operation mode (for /api/operation endpoint)
-            # Mode can be "self_consumption", "backup", or "autonomous" (time-based control).
-            # This is fetched from /api/operation on the gateway via pw.get_mode() and
-            # must be polled on every cycle so that mode changes made in the Tesla app
-            # are reflected promptly (fixes issue #14).
-            # Pre-fill from last known good value so a transient failure doesn't wipe the cache.
-            last_data = self._last_successful_data.get(gateway_id)
-            if last_data and last_data.mode:
-                data.mode = last_data.mode
-            try:
-                data.mode = await asyncio.wait_for(
-                    loop.run_in_executor(self._executor, pw.get_mode),
-                    timeout=5.0,
-                )
-            except (asyncio.TimeoutError, Exception) as e:
-                logger.debug(f"Operation mode not available for {gateway_id}: {e}")
-
-            # Try to get reserve and time remaining (for caching)
-            try:
-                # Request the Tesla App scaled reserve setting (scale=True)
-                data.reserve = await asyncio.wait_for(
-                    loop.run_in_executor(self._executor, lambda: pw.get_reserve(scale=True)), timeout=5.0
-                )
-                data.time_remaining = await asyncio.wait_for(
-                    loop.run_in_executor(self._executor, pw.get_time_remaining),
-                    timeout=5.0,
-                )
-            except (asyncio.TimeoutError, Exception) as e:
-                logger.debug(
-                    f"Reserve/time remaining not available for {gateway_id}: {e}"
+            except asyncio.TimeoutError:
+                raise Exception(
+                    f"Poll of {gateway_id} exceeded overall budget of {poll_budget:.0f}s"
                 )
 
-            # Try to get system status for /pod endpoint (for caching)
-            try:
-                data.system_status = await asyncio.wait_for(
-                    loop.run_in_executor(self._executor, pw.system_status), timeout=5.0
-                )
-            except (asyncio.TimeoutError, Exception) as e:
-                logger.debug(f"System status not available for {gateway_id}: {e}")
-
-            # Try to get fan speeds for /fans endpoint (TEDAPI only)
-            # get_fan_speeds() lives on the TEDAPI client (pw.tedapi),
-            # not on the top-level Powerwall object itself
-            try:
-                if hasattr(pw, "tedapi") and pw.tedapi and hasattr(pw.tedapi, "get_fan_speeds"):
-                    data.fan_speeds = await asyncio.wait_for(
-                        loop.run_in_executor(self._executor, pw.tedapi.get_fan_speeds),
-                        timeout=5.0,
-                    )
-            except (asyncio.TimeoutError, Exception) as e:
-                logger.debug(f"Fan speeds not available for {gateway_id}: {e}")
-
-            # Try to get networks for /api/system/networks endpoint
-            try:
-                networks_result = await asyncio.wait_for(
-                    loop.run_in_executor(
-                        self._executor, lambda: pw.poll("/api/networks")
-                    ),
-                    timeout=5.0,
-                )
-                if networks_result and isinstance(networks_result, list):
-                    data.networks = networks_result
-                elif networks_result and isinstance(networks_result, str):
-                    try:
-                        data.networks = json.loads(networks_result)
-                    except json.JSONDecodeError:
-                        pass
-            except (asyncio.TimeoutError, Exception) as e:
-                logger.debug(f"Networks not available for {gateway_id}: {e}")
-
-            # Try to get powerwalls for /api/powerwalls endpoint
-            try:
-                powerwalls_result = await asyncio.wait_for(
-                    loop.run_in_executor(
-                        self._executor, lambda: pw.poll("/api/powerwalls")
-                    ),
-                    timeout=5.0,
-                )
-                if powerwalls_result and isinstance(powerwalls_result, dict):
-                    data.powerwalls = powerwalls_result
-                elif powerwalls_result and isinstance(powerwalls_result, str):
-                    try:
-                        data.powerwalls = json.loads(powerwalls_result)
-                    except json.JSONDecodeError:
-                        pass
-            except (asyncio.TimeoutError, Exception) as e:
-                logger.debug(f"Powerwalls not available for {gateway_id}: {e}")
-
-            # Guard against partial TEDAPI follower snapshots replacing a complete
-            # multi-Powerwall view for a single poll cycle.
-            data = self._preserve_complete_multi_pw_snapshot(gateway_id, data)
 
             # Update cache
             gateway = self.gateways[gateway_id]
@@ -903,16 +976,8 @@ class GatewayManager:
                 gateway=gateway, data=data, online=True, last_updated=data.timestamp
             )
 
-            # Fire-and-forget MQTT publish after the cache is updated.
-            # Importing here (late import) avoids a circular dependency at module
-            # load time (publisher.py → config → gateway_manager).
-            # create_task() ensures MQTT failures never raise into this poll path.
-            from app.mqtt.publisher import mqtt_publisher
-            if mqtt_publisher.enabled:
-                asyncio.create_task(
-                    mqtt_publisher.publish_gateway(gateway_id, self.cache[gateway_id]),
-                    name=f"mqtt-publish-{gateway_id}",
-                )
+            # Publish to MQTT after the cache is updated (never raises here).
+            self._schedule_mqtt_publish(gateway_id)
 
         except Exception as e:
             gateway = self.gateways[gateway_id]
@@ -958,12 +1023,35 @@ class GatewayManager:
             )
 
             # Publish the offline status to MQTT so HA reflects gateway going offline.
-            from app.mqtt.publisher import mqtt_publisher
-            if mqtt_publisher.enabled:
-                asyncio.create_task(
-                    mqtt_publisher.publish_gateway(gateway_id, self.cache[gateway_id]),
-                    name=f"mqtt-publish-{gateway_id}",
-                )
+            self._schedule_mqtt_publish(gateway_id)
+
+    def _schedule_mqtt_publish(self, gateway_id: str) -> None:
+        """Schedule an MQTT publish of the current cached status for a gateway.
+
+        Importing here (late import) avoids a circular dependency at module
+        load time (publisher.py → config → gateway_manager), and create_task()
+        ensures MQTT failures never raise into the poll path.
+
+        At most one publish task is in flight per gateway (latest-wins): when
+        the broker is slower than the poll interval, spawning a new unbounded
+        task every cycle piles up tasks and interleaves stale-then-fresh
+        retained topic writes.  The dict also holds a strong reference — the
+        event loop keeps only weak refs, so an unreferenced task could be
+        garbage-collected mid-publish.
+        """
+        from app.mqtt.publisher import mqtt_publisher
+
+        if not mqtt_publisher.enabled:
+            return
+        previous = self._mqtt_tasks.get(gateway_id)
+        if previous and not previous.done():
+            # Replace the in-flight publish: the new task republishes every
+            # topic with fresher data, so cancelling mid-publish is safe.
+            previous.cancel()
+        self._mqtt_tasks[gateway_id] = asyncio.create_task(
+            mqtt_publisher.publish_gateway(gateway_id, self.cache[gateway_id]),
+            name=f"mqtt-publish-{gateway_id}",
+        )
 
     def get_gateway(self, gateway_id: str) -> Optional[GatewayStatus]:
         """Get status for a specific gateway with graceful degradation support.

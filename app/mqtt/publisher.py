@@ -101,6 +101,25 @@ class MqttPublisher:
         )
         logger.info("MQTT publisher starting...")
 
+    async def publish_offline(self, gateway_ids) -> None:
+        """Mark per-gateway availability topics offline (used at shutdown).
+
+        The broker LWT only covers the global availability topic; without
+        this, per-gateway topics stay 'online' after a clean shutdown and HA
+        keeps showing stale retained sensor values as live.
+        """
+        if not self.enabled or not self._connected or self._client is None:
+            return
+        from app.config import settings  # late import
+
+        for gateway_id in gateway_ids:
+            await self._safe_publish(
+                f"{settings.mqtt_topic_prefix}/{gateway_id}/availability",
+                "offline",
+                settings.mqtt_retain,
+                settings.mqtt_qos,
+            )
+
     async def stop(self) -> None:
         """Gracefully stop the publisher.  Called from main.py lifespan shutdown."""
         if not self.enabled:

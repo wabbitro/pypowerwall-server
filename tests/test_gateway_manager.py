@@ -633,6 +633,10 @@ async def test_initialize_creates_cloud_control(monkeypatch):
 
     await gm.initialize(configs, poll_interval=5)
 
+    # Cloud control connects in the background so startup isn't blocked
+    assert gm._cloud_control_task is not None
+    await gm._cloud_control_task
+
     # _cloud_control should be set
     assert gm._cloud_control is not None
 
@@ -667,7 +671,8 @@ async def test_initialize_no_cloud_control_for_cloud_mode(monkeypatch):
 
     await gm.initialize(configs, poll_interval=5)
 
-    # pure cloud mode — no hybrid _cloud_control needed
+    # pure cloud mode — no hybrid _cloud_control needed, no background task
+    assert gm._cloud_control_task is None
     assert gm._cloud_control is None
 
     await gm.shutdown()
@@ -706,6 +711,7 @@ async def test_initialize_cloud_control_uses_pw_authpath_fallback(monkeypatch):
     gm._cloud_control = None
 
     await gm.initialize(configs, poll_interval=5)
+    await gm._cloud_control_task
 
     # The cloud control connection should have been created with the global authpath
     # (captured_kwargs reflects the LAST Powerwall() call, which is the cloud control one
@@ -748,6 +754,7 @@ async def test_initialize_cloud_control_exception_is_handled(monkeypatch):
 
     # Should not raise — exception is swallowed with a warning
     await gm.initialize(configs, poll_interval=5)
+    await gm._cloud_control_task
 
     assert gm._cloud_control is None
 
