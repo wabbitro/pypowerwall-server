@@ -2,7 +2,7 @@
 
 ## Version History
 
-### [Unreleased]
+### [0.4.0] - 2026-07-01
 
 **Security:**
 - **Unauthenticated write proxy closed** — `POST /api/gateways/{id}/api/{path}` proxied arbitrary POSTs to the gateway with no authentication, allowing anyone with network access to change operating mode or backup reserve even when control features were disabled. The endpoint now requires the same `PW_CONTROL_SECRET` bearer token as `/control/*`. `verify_control_token` moved to shared `app/api/auth.py` and now uses a constant-time comparison.
