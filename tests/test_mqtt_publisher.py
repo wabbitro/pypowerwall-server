@@ -128,17 +128,19 @@ class TestMqttPublisherEnabled:
     """Publisher behaviour when MQTT_HOST is set (mocked client)."""
 
     def _make_publisher(self, monkeypatch) -> MqttPublisher:
-        monkeypatch.setenv("MQTT_HOST", "localhost")
-        monkeypatch.setenv("MQTT_PORT", "1883")
-        monkeypatch.setenv("MQTT_TOPIC_PREFIX", "pypowerwall")
-        monkeypatch.setenv("MQTT_QOS", "1")
-        monkeypatch.setenv("MQTT_RETAIN", "true")
-        # Reload settings so the new env vars are picked up
-        import importlib
-        import app.config as cfg_module
-        importlib.reload(cfg_module)
-        pub = MqttPublisher()
-        return pub
+        # Patch the settings singleton directly.  Do NOT importlib.reload
+        # app.config here: reloading creates a NEW settings object bound to
+        # the reloaded module while every module that did a top-level
+        # `from app.config import settings` (e.g. app.api.legacy) keeps the
+        # OLD one — after that, monkeypatching settings in any later test
+        # module silently stops reaching those endpoints.
+        from app.config import settings
+        monkeypatch.setattr(settings, "mqtt_host", "localhost")
+        monkeypatch.setattr(settings, "mqtt_port", 1883)
+        monkeypatch.setattr(settings, "mqtt_topic_prefix", "pypowerwall")
+        monkeypatch.setattr(settings, "mqtt_qos", 1)
+        monkeypatch.setattr(settings, "mqtt_retain", True)
+        return MqttPublisher()
 
     def test_enabled_when_host_set(self, monkeypatch):
         from app.config import settings as _settings
@@ -378,14 +380,15 @@ class TestMqttStringTopics:
     """Verify solar string MQTT topics are published correctly."""
 
     def _make_publisher(self, monkeypatch) -> MqttPublisher:
-        monkeypatch.setenv("MQTT_HOST", "localhost")
-        monkeypatch.setenv("MQTT_PORT", "1883")
-        monkeypatch.setenv("MQTT_TOPIC_PREFIX", "pypowerwall")
-        monkeypatch.setenv("MQTT_QOS", "1")
-        monkeypatch.setenv("MQTT_RETAIN", "true")
-        import importlib
-        import app.config as cfg_module
-        importlib.reload(cfg_module)
+        # Patch the settings singleton directly (see note in
+        # TestMqttPublisherEnabled._make_publisher — reloading app.config
+        # desynchronizes the singleton across modules).
+        from app.config import settings
+        monkeypatch.setattr(settings, "mqtt_host", "localhost")
+        monkeypatch.setattr(settings, "mqtt_port", 1883)
+        monkeypatch.setattr(settings, "mqtt_topic_prefix", "pypowerwall")
+        monkeypatch.setattr(settings, "mqtt_qos", 1)
+        monkeypatch.setattr(settings, "mqtt_retain", True)
         pub = MqttPublisher()
         mock_client = AsyncMock()
         pub._client = mock_client
