@@ -55,6 +55,7 @@ import psutil
 import pypowerwall
 from fastapi import APIRouter, HTTPException, Response, Header
 
+from app.api.auth import verify_control_token
 from app.core.gateway_manager import gateway_manager
 from app.config import settings, SERVER_VERSION
 from app.utils.stats_tracker import stats_tracker
@@ -62,27 +63,6 @@ from app.utils.stats_tracker import stats_tracker
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-
-def verify_control_token(authorization: Optional[str] = Header(None)):
-    """Verify control token for authenticated operations."""
-    if not settings.control_enabled or not settings.control_secret:
-        raise HTTPException(status_code=403, detail="Control features not enabled")
-
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Authorization header required")
-
-    # Support both "Bearer token" and plain token
-    token = (
-        authorization.replace("Bearer ", "")
-        if authorization.startswith("Bearer ")
-        else authorization
-    )
-
-    if token != settings.control_secret:
-        raise HTTPException(status_code=401, detail="Invalid control token")
-
-    return True
 
 
 @router.post("/control/{path:path}")
@@ -110,13 +90,35 @@ async def control_api(
                 detail="'value' must be a boolean (true or false)",
             )
 
+    # Same for reserve and mode: an empty or typoed payload must never
+    # silently drain the backup reserve to 0 or flip the operating mode.
+    valid_modes = ["self_consumption", "backup", "autonomous"]
+
+    if path == "reserve":
+        value = data.get("value")
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise HTTPException(
+                status_code=400,
+                detail="'value' must be an integer reserve level (0-100)",
+            )
+        if not 0 <= value <= 100:
+            raise HTTPException(
+                status_code=400,
+                detail="'value' must be between 0 and 100",
+            )
+
+    if path == "mode":
+        if data.get("value") not in valid_modes:
+            raise HTTPException(
+                status_code=400,
+                detail="'value' must be a valid mode: " + ", ".join(valid_modes),
+            )
+
     # Optional companion parameters for combined reserve+mode writes.
     # When a caller wants to change both reserve and mode, sending them in a
     # single request avoids duplicate Tesla audit-log entries caused by
     # set_reserve() + set_mode() each calling set_operation() internally.
     # Omitting the companion parameter preserves the original behaviour.
-    valid_modes = ["self_consumption", "backup", "autonomous"]
-
     if path == "reserve" and "mode" in data:
         mode_val = data["mode"]
         if mode_val not in valid_modes:
@@ -125,12 +127,7 @@ async def control_api(
                 detail="Invalid 'mode' companion value. Must be one of: "
                        + ", ".join(valid_modes),
             )
-        level = data.get("value", 0)
-        if not isinstance(level, int) or isinstance(level, bool):
-            raise HTTPException(
-                status_code=400,
-                detail="'value' must be an integer reserve level",
-            )
+        level = data["value"]
         if gateway_manager._cloud_control:
             result = await gateway_manager.cloud_control(
                 "set_operation", level, mode_val, timeout=10.0
@@ -161,13 +158,7 @@ async def control_api(
                 status_code=400,
                 detail="Invalid 'level' companion value. Must be an integer.",
             )
-        mode = data.get("value", "self_consumption")
-        if mode not in valid_modes:
-            raise HTTPException(
-                status_code=400,
-                detail="'value' must be a valid mode: "
-                       + ", ".join(valid_modes),
-            )
+        mode = data["value"]
         if gateway_manager._cloud_control:
             result = await gateway_manager.cloud_control(
                 "set_operation", level_val, mode, timeout=10.0
@@ -194,8 +185,8 @@ async def control_api(
     # Map control paths to pypowerwall cloud control methods.
     # Used for TEDAPI gateways with cloud credentials (hybrid mode).
     cloud_control_map = {
-        "reserve": ("set_reserve", lambda d: [d.get("value", 0)]),
-        "mode": ("set_mode", lambda d: [d.get("value", "self_consumption")]),
+        "reserve": ("set_reserve", lambda d: [d["value"]]),
+        "mode": ("set_mode", lambda d: [d["value"]]),
         "grid_charging": ("set_grid_charging", lambda d: [d["value"]]),
     }
 
@@ -1734,7 +1725,10 @@ async def get_stats():
     config = {
         "PW_BIND_ADDRESS": settings.server_host,
         "PW_PASSWORD": "**********" if settings.pw_password else None,
-        "PW_EMAIL": settings.pw_email or "",
+        # PII / infrastructure details are masked: /stats is unauthenticated,
+        # so the Tesla account email, site id, and filesystem paths must not
+        # be readable by arbitrary LAN (or cross-origin) clients.
+        "PW_EMAIL": "**********" if settings.pw_email else "",
         "PW_HOST": settings.pw_host or "",
         "PW_TIMEZONE": settings.pw_timezone,
         "PW_DEBUG": settings.debug,
@@ -1745,10 +1739,10 @@ async def get_stats():
         "PW_HTTPS": "yes" if settings.https_mode else "no",
         "PW_PORT": settings.server_port,
         "PW_STYLE": settings.style,
-        "PW_SITEID": settings.siteid,
-        "PW_AUTH_PATH": settings.pw_authpath or "",
+        "PW_SITEID": "**********" if settings.siteid else None,
+        "PW_AUTH_PATH": "**********" if settings.pw_authpath else "",
         "PW_AUTH_MODE": settings.auth_mode,
-        "PW_CACHE_FILE": settings.cache_file,
+        "PW_CACHE_FILE": "**********" if settings.cache_file else None,
         "PW_CONTROL_SECRET": "**********" if settings.control_secret else None,
         "PW_GW_PWD": "**********" if settings.pw_gw_pwd else None,
         "PW_NEG_SOLAR": True,  # Always enabled in this implementation

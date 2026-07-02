@@ -185,22 +185,21 @@ app = FastAPI(
 )
 
 # Configure CORS.
-# The CORS spec forbids allow_credentials=True combined with allow_origins=["*"].
-# However, the powerflow app.js runs in iframes on different origins and sends
-# cookies (AuthCookie/UserRecord injected by track_requests), making every request
-# credentialed.  Credentialed requests require the exact origin reflected back —
-# not a wildcard — plus Access-Control-Allow-Credentials: true.
+# The CORS spec forbids allow_credentials=True combined with allow_origins=["*"]
+# because reflecting any origin WITH credentials lets every website a user
+# visits make credentialed requests here and read the responses.  So:
 #
-# Solution: when CORS_ORIGINS is the default wildcard, use allow_origin_regex=".*"
-# instead.  Starlette then reflects the actual request Origin and sets credentials,
-# satisfying the browser for both plain and credentialed cross-origin requests.
-# When specific origins are configured via CORS_ORIGINS, use those directly.
+# - Wildcard (default): plain "*" with allow_credentials=False.  The vendored
+#   powerflow app.js is patched to credentials: "same-origin" and uses relative
+#   URLs, so same-origin embedding (and its AuthCookie compat cookies) does not
+#   depend on CORS credentials at all.
+# - Explicit CORS_ORIGINS list: those origins with credentials allowed, for
+#   deployments that genuinely need credentialed cross-origin access.
 _cors_wildcard = "*" in settings.cors_origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[] if _cors_wildcard else settings.cors_origins,
-    allow_origin_regex=".*" if _cors_wildcard else None,
-    allow_credentials=True,
+    allow_origins=["*"] if _cors_wildcard else settings.cors_origins,
+    allow_credentials=not _cors_wildcard,
     allow_methods=["*"],
     allow_headers=["*"],
 )
