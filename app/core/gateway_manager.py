@@ -611,6 +611,15 @@ class GatewayManager:
                 # If we can't get aggregates, this is a real connection failure
                 raise Exception(f"Failed to fetch aggregates: {e}")
 
+            # pypowerwall signals connection failure by RETURNING None (or an
+            # ERROR payload), not by raising.  Without this check a dead
+            # gateway would be marked online with empty data, resetting the
+            # backoff and clobbering the last-known-good snapshot.
+            if not aggregates or (
+                isinstance(aggregates, dict) and "ERROR" in aggregates
+            ):
+                raise Exception(f"No aggregates data from {gateway_id}")
+
             # Apply negative solar correction if configured (PW_NEG_SOLAR=no)
             # This is done at fetch time so all endpoints get consistent data
             from app.config import settings
@@ -1243,21 +1252,36 @@ class GatewayManager:
         """
         aggregate = AggregateData(timestamp=datetime.now().timestamp())
 
-        for gateway_id, status in self.cache.items():
+        # Battery % must be averaged over the gateways that actually reported
+        # SOE — solar-only inverters (type: "inverter") and transient SOE
+        # fetch failures would otherwise dilute the average toward zero.
+        num_soe = 0
+        num_soe_raw = 0
+
+        # Use get_all_gateways() so graceful degradation applies here the same
+        # way it does for the legacy endpoints — otherwise a brief outage makes
+        # aggregate totals dip to zero while /aggregates still shows steady
+        # power from the stale-within-TTL snapshot.
+        for gateway_id, status in self.get_all_gateways().items():
             aggregate.num_gateways += 1
 
-            if not status.online or not status.data:
+            if not status.data:
                 continue
 
-            aggregate.num_online += 1
+            if status.online:
+                aggregate.num_online += 1
+            else:
+                aggregate.num_degraded += 1
             data = status.data
 
             # Aggregate battery percentage
             # TODO: Weight by capacity when battery capacity info is available
             if data.soe_raw is not None:
                 aggregate.total_battery_percent_raw += data.soe_raw
+                num_soe_raw += 1
             if data.soe is not None:
                 aggregate.total_battery_percent += data.soe
+                num_soe += 1
 
             # Aggregate power flows (simple sum - works well for separate systems)
             if data.aggregates:
@@ -1283,18 +1307,24 @@ class GatewayManager:
             aggregate.gateways[gateway_id] = status
 
         # Calculate average battery percentage (simple average for now)
-        if aggregate.num_online > 0:
-            aggregate.total_battery_percent_raw /= aggregate.num_online
-            aggregate.total_battery_percent /= aggregate.num_online
+        if num_soe_raw > 0:
+            aggregate.total_battery_percent_raw /= num_soe_raw
+        if num_soe > 0:
+            aggregate.total_battery_percent /= num_soe
 
         # Grid power is the site power (positive = importing, negative = exporting)
         # The "site" meter in aggregates measures grid interaction directly
         aggregate.total_grid_power = aggregate.total_site_power
 
-        # Get grid status from default gateway if available
-        default_gateway = self.cache.get("default")
-        if default_gateway and default_gateway.data:
-            aggregate.grid_status = default_gateway.data.grid_status
+        # Get grid status from the primary gateway: "default" if configured,
+        # otherwise the first configured gateway (not everyone names one "default")
+        primary_id = "default" if "default" in self.gateways else next(
+            iter(self.gateways), None
+        )
+        if primary_id:
+            primary = aggregate.gateways.get(primary_id) or self.cache.get(primary_id)
+            if primary and primary.data:
+                aggregate.grid_status = primary.data.grid_status
 
         return aggregate
 

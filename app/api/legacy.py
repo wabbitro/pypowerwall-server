@@ -1098,7 +1098,7 @@ async def get_api_status():
             up_time_seconds = status.data.status.get("up_time_seconds")
         
         return {
-            "din": din or status.gateway.din if status.gateway else None,
+            "din": din or status.data.din,
             "start_time": start_time,
             "up_time_seconds": up_time_seconds,
             "is_new": False,

@@ -359,9 +359,14 @@ class MqttPublisher:
                     f"{prefix}/status", json.dumps(summary), retain, qos
                 )
 
-            # Mark availability as online
+            # Per-gateway availability must track the actual gateway state.
+            # Discovery uses availability_mode "all", so if this topic never
+            # goes "offline" HA keeps showing stale retained sensor values
+            # after the gateway drops (the LWT only covers the global topic).
             await self._safe_publish(
-                f"{prefix}/availability", "online", retain, qos
+                f"{prefix}/availability",
+                "online" if status.online else "offline",
+                retain, qos,
             )
 
         except Exception as e:

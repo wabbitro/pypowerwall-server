@@ -251,5 +251,6 @@ class AggregateData(BaseModel):
     grid_status: Optional[str] = None  # "UP", "DOWN", etc. from primary gateway
     num_gateways: int = 0
     num_online: int = 0
+    num_degraded: int = 0  # Offline gateways contributing stale data within PW_CACHE_TTL
     gateways: Dict[str, GatewayStatus] = Field(default_factory=dict)
     timestamp: float = 0.0
