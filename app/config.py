@@ -371,10 +371,21 @@ class Settings(BaseSettings):
 
         server = doc.get("server")
         if isinstance(server, dict):
+            # Parse defensively: a malformed value (e.g. port: "eight")
+            # should log an error and keep the default, not crash startup.
             if "host" in server:
                 self.server_host = str(server["host"])
             if "port" in server:
-                self.server_port = int(server["port"])
+                try:
+                    port = int(server["port"])
+                    if not 1 <= port <= 65535:
+                        raise ValueError(f"port out of range: {port}")
+                    self.server_port = port
+                except (TypeError, ValueError) as e:
+                    logger.error(
+                        f"Invalid server.port in {config_path} ({e}) - "
+                        f"keeping {self.server_port}"
+                    )
             if isinstance(server.get("cors_origins"), list):
                 self.cors_origins = [str(o) for o in server["cors_origins"]]
 

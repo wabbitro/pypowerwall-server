@@ -60,7 +60,7 @@ import asyncio
 import json
 import logging
 import ssl
-from typing import Optional, Set
+from typing import List, Optional, Set
 
 logger = logging.getLogger(__name__)
 
@@ -101,7 +101,7 @@ class MqttPublisher:
         )
         logger.info("MQTT publisher starting...")
 
-    async def publish_offline(self, gateway_ids) -> None:
+    async def publish_offline(self, gateway_ids: List[str]) -> None:
         """Mark per-gateway availability topics offline (used at shutdown).
 
         The broker LWT only covers the global availability topic; without

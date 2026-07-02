@@ -11,7 +11,6 @@ Covers:
 import json
 
 import pytest
-from unittest.mock import Mock
 
 from app.core.gateway_manager import gateway_manager
 
@@ -215,6 +214,26 @@ def test_aggregate_soe_ignores_gateways_without_soe(connected_gateway):
     assert aggregate.total_battery_percent_raw == pytest.approx(
         connected_gateway.data.soe_raw
     )
+
+
+# ---------------------------------------------------------------------------
+# WebSocket gateway cache must not grow for unknown gateway IDs
+# ---------------------------------------------------------------------------
+
+def test_ws_gateway_cache_bounded(connected_gateway):
+    """Random gateway IDs must not create persistent cache entries."""
+    from app.api import websockets as ws
+
+    ws._gateway_cache.clear()
+    for i in range(50):
+        result = ws._gateway_json(f"bogus-{i}")
+        assert "Gateway not found" in result
+    assert len(ws._gateway_cache) == 0
+
+    # Configured gateways do get cached
+    ws._gateway_json("test-gateway")
+    assert set(ws._gateway_cache) == {"test-gateway"}
+    ws._gateway_cache.clear()
 
 
 # ---------------------------------------------------------------------------

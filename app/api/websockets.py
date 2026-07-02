@@ -75,7 +75,14 @@ def _aggregate_json() -> str:
 
 
 def _gateway_json(gateway_id: str) -> str:
-    """Return one gateway's status as JSON, rebuilt at most once per second."""
+    """Return one gateway's status as JSON, rebuilt at most once per second.
+
+    Only configured gateway IDs are cached — the configured set is bounded,
+    whereas caching arbitrary requested IDs would let a client grow the dict
+    without limit by connecting to /ws/gateway/{random}.
+    """
+    if gateway_id not in gateway_manager.gateways:
+        return '{"error": "Gateway not found"}'
     now = time.monotonic()
     entry = _gateway_cache.get(gateway_id)
     if entry is None or now - entry["ts"] >= _STREAM_CACHE_SECONDS:
