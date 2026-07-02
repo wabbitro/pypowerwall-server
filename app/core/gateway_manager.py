@@ -87,6 +87,12 @@ _WRITE_METHODS = frozenset(
         "set_operation",
         "set_grid_charging",
         "set_grid_export",
+        # Raw POST is the control fallback for v1r/cloud-mode/FleetAPI
+        # gateways (e.g. post("/api/operation", ...)). It targets the same
+        # Tesla site as the set_* methods, so it must hold the same lock or
+        # the read-modify-write race the lock prevents stays open on the
+        # fallback path.
+        "post",
     }
 )
 
