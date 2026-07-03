@@ -184,6 +184,11 @@ PW_GATEWAYS='[
 
 ### Configuration File (gateways.yaml)
 
+Pass a YAML (or JSON) config file with `--config gateways.yaml` or
+`PW_CONFIG=/path/to/gateways.yaml`. A template ships as
+`gateways.yaml.example` — copy it to `gateways.yaml` (which is gitignored,
+since it holds gateway passwords) and edit:
+
 ```yaml
 server:
   host: 0.0.0.0
@@ -479,16 +484,17 @@ The server maintains no persistent state or historical data. All historical data
 ### Control Features & Security
 **Default: Read-only** - The server operates in monitoring mode by default.
 
-**Optional Control Mode**: Enable with environment variables:
+**Optional Control Mode**: Enable by setting the control secret:
 ```bash
-CONTROL_ENABLED=true
-CONTROL_TOKEN=your-secure-random-token
+PW_CONTROL_SECRET=your-secure-random-token
 ```
 
 When control is enabled:
 - All control operations require authentication via token
-- Token must be sent in `Authorization` header
-- Legacy POST endpoints are disabled (redirect to `/control` endpoint)
+- Token must be sent in the `Authorization` header (plain or `Bearer <token>`)
+- Applies to `/control/*` and the per-gateway POST proxy
+  (`POST /api/gateways/{id}/api/*`)
+- When `PW_CONTROL_SECRET` is not set, all write endpoints return 403
 
 ### Data Aggregation Strategy
 Multi-gateway aggregation uses **smart aggregation** that will evolve over time:

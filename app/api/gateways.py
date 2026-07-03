@@ -15,9 +15,10 @@ Design Notes:
     - Each gateway can be queried independently
     - Control operations support per-gateway targeting
 """
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from typing import Dict
 
+from app.api.auth import verify_control_token
 from app.core.gateway_manager import gateway_manager
 from app.models.gateway import GatewayStatus
 
@@ -115,9 +116,16 @@ async def proxy_gateway_api(gateway_id: str, path: str):
     return result
 
 
-@router.post("/{gateway_id}/api/{path:path}")
+@router.post(
+    "/{gateway_id}/api/{path:path}", dependencies=[Depends(verify_control_token)]
+)
 async def proxy_gateway_api_post(gateway_id: str, path: str, data: dict):
     """Proxy POST requests to a specific gateway.
+
+    Writes to the gateway are control operations, so this endpoint requires
+    the same PW_CONTROL_SECRET bearer token as the legacy /control routes.
+    Without it, this route would let any client on the network change
+    operating mode or backup reserve, bypassing control auth entirely.
 
     Args:
         gateway_id: Gateway identifier
@@ -128,6 +136,7 @@ async def proxy_gateway_api_post(gateway_id: str, path: str, data: dict):
         JSON response from the gateway API
 
     Raises:
+        HTTPException 401/403: Missing/invalid control token or control disabled
         HTTPException 404: Gateway not found
         HTTPException 503: API call failed or gateway offline
     """

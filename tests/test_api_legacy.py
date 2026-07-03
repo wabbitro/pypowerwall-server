@@ -362,11 +362,16 @@ def test_control_cloud_returns_none_gives_503(
 def test_control_reserve_fallback_without_cloud(
     control_client, connected_gateway, mock_pypowerwall
 ):
-    """Test that POST /control/reserve falls back to call_api when no _cloud_control."""
+    """Test that POST /control/reserve falls back to call_api when no _cloud_control.
+
+    Fork-specific: v1r local mode calls set_reserve() directly (routes through
+    write_config_v1r), not a raw POST to a nonexistent /api/{path} endpoint -
+    see 377421c.
+    """
     from app.core.gateway_manager import gateway_manager
 
     gateway_manager._cloud_control = None
-    mock_pypowerwall.post.return_value = {"result": "Updated"}
+    mock_pypowerwall.set_reserve.return_value = {"result": "Updated"}
 
     response = control_client.post(
         "/control/reserve",
@@ -375,7 +380,7 @@ def test_control_reserve_fallback_without_cloud(
     )
 
     assert response.status_code == 200
-    mock_pypowerwall.post.assert_called_once()
+    mock_pypowerwall.set_reserve.assert_called_once_with(20)
 
 
 def test_control_unmapped_path_uses_call_api(
