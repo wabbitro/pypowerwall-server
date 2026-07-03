@@ -44,11 +44,53 @@ Design Notes:
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 import asyncio
 import logging
+import time
 
 from app.core.gateway_manager import gateway_manager
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+# Serialize-once caches for streamed payloads.
+#
+# The aggregate snapshot embeds every gateway's full GatewayStatus (vitals,
+# system_status, tedapi_config, ...) and can run to hundreds of KB.  Without
+# a cache, every connected client independently rebuilds and re-serializes
+# an identical payload every second on the event loop — a steady CPU tax
+# that competes with the poller.  All handlers run on one event loop, so a
+# plain dict is safe (no locking needed).
+_STREAM_CACHE_SECONDS = 1.0
+_aggregate_cache: dict = {"ts": 0.0, "text": ""}
+_gateway_cache: dict = {}  # gateway_id -> {"ts": float, "text": str}
+
+
+def _aggregate_json() -> str:
+    """Return the aggregate snapshot as JSON, rebuilt at most once per second."""
+    now = time.monotonic()
+    if not _aggregate_cache["text"] or now - _aggregate_cache["ts"] >= _STREAM_CACHE_SECONDS:
+        _aggregate_cache["text"] = gateway_manager.get_aggregate_data().model_dump_json()
+        _aggregate_cache["ts"] = now
+    return _aggregate_cache["text"]
+
+
+def _gateway_json(gateway_id: str) -> str:
+    """Return one gateway's status as JSON, rebuilt at most once per second.
+
+    Only configured gateway IDs are cached — the configured set is bounded,
+    whereas caching arbitrary requested IDs would let a client grow the dict
+    without limit by connecting to /ws/gateway/{random}.
+    """
+    if gateway_id not in gateway_manager.gateways:
+        return '{"error": "Gateway not found"}'
+    now = time.monotonic()
+    entry = _gateway_cache.get(gateway_id)
+    if entry is None or now - entry["ts"] >= _STREAM_CACHE_SECONDS:
+        status = gateway_manager.get_gateway(gateway_id)
+        text = status.model_dump_json() if status else '{"error": "Gateway not found"}'
+        entry = {"ts": now, "text": text}
+        _gateway_cache[gateway_id] = entry
+    return entry["text"]
 
 
 class ConnectionManager:
@@ -120,9 +162,8 @@ async def websocket_aggregate(websocket: WebSocket):
     await manager.connect(websocket)
     try:
         while True:
-            # Send aggregate data every second
-            data = gateway_manager.get_aggregate_data()
-            await websocket.send_json(data.model_dump())
+            # Send aggregate data every second (serialized once for all clients)
+            await websocket.send_text(_aggregate_json())
             await asyncio.sleep(1)
     except WebSocketDisconnect:
         manager.disconnect(websocket)
@@ -150,11 +191,7 @@ async def websocket_gateway(websocket: WebSocket, gateway_id: str):
     await manager.connect(websocket)
     try:
         while True:
-            status = gateway_manager.get_gateway(gateway_id)
-            if status:
-                await websocket.send_json(status.model_dump())
-            else:
-                await websocket.send_json({"error": "Gateway not found"})
+            await websocket.send_text(_gateway_json(gateway_id))
             await asyncio.sleep(1)
     except WebSocketDisconnect:
         manager.disconnect(websocket)

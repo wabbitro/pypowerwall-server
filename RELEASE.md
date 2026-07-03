@@ -2,6 +2,38 @@
 
 ## Version History
 
+### [0.4.0] - 2026-07-01
+
+**Security:**
+- **Unauthenticated write proxy closed** — `POST /api/gateways/{id}/api/{path}` proxied arbitrary POSTs to the gateway with no authentication, allowing anyone with network access to change operating mode or backup reserve even when control features were disabled. The endpoint now requires the same `PW_CONTROL_SECRET` bearer token as `/control/*`. `verify_control_token` moved to shared `app/api/auth.py` and now uses a constant-time comparison.
+- **Gateway credentials removed from API responses** — the `Gateway` model serialized `gw_pwd` (gateway Wi-Fi password) and `email` (Tesla account) in `/api/gateways/`, `/api/aggregate/`, and WebSocket streams. Both fields are now excluded from serialization.
+- **CORS no longer reflects arbitrary origins with credentials** — the wildcard default sent `Access-Control-Allow-Credentials: true` with the caller's origin reflected, letting any website make credentialed cross-origin requests. Wildcard mode now uses plain `*` without credentials; explicit `CORS_ORIGINS` lists still allow credentialed access.
+- **/stats masks PII** — Tesla account email, site ID, and filesystem paths are now masked in the unauthenticated `/stats` endpoint.
+- `gateways.yaml` ships as `gateways.yaml.example` and the real file is gitignored (it holds gateway passwords).
+
+**Fixed:**
+- **Dead gateways were never detected** — pypowerwall signals connection failure by returning `None` rather than raising, so a dead gateway stayed "online" with empty data, reset its backoff, and overwrote the last-known-good snapshot used for graceful degradation. `None`/`ERROR` aggregates now count as poll failures.
+- **`/control/reserve` with an empty body silently set reserve to 0** (and `/control/mode` silently set `self_consumption`). Both now require a validated `value` and return HTTP 400 otherwise, matching the existing `grid_charging` validation.
+- **`/api/status` returned HTTP 500** whenever the cached DIN was absent (attribute error on a non-existent `Gateway.din` field); now falls back to `PowerwallData.din`.
+- **Per-gateway MQTT availability never went offline** — `publish_gateway()` published `"online"` unconditionally, so HA kept showing stale retained sensor values as live after a gateway dropped. Availability now tracks the gateway state, and shutdown flushes `"offline"` to all per-gateway topics before disconnecting.
+- **Aggregate battery percent diluted by solar-only inverters** — the average divided by all online gateways instead of the gateways that reported SOE. Aggregates also now apply graceful degradation (with a new `num_degraded` field) and derive grid status from the primary configured gateway instead of the hardcoded id `"default"`.
+- **Generic environment variables leaked into gateway config** — `GatewayConfig` was a `BaseSettings` with an empty env prefix, so `PORT`, `EMAIL`, `NAME`, `HOST` (ubiquitous on container platforms) silently populated gateway fields. It is now a plain model constructed only from explicit config, and `name` defaults to `id`.
+- **One bad `PW_GATEWAYS` entry discarded the whole list** and silently fell back to legacy single-gateway mode; entries are now validated individually.
+- **Write lock bypassed on the v1r/cloud-mode control fallback** — raw `post` calls now hold the same write lock as `set_*` methods.
+
+**Performance:**
+- **Per-gateway polling tasks** — each gateway polls on its own independent fixed tick, so a slow or degraded gateway no longer stalls data freshness for healthy ones. The whole per-gateway fetch is also capped by an overall budget (previously ~22 sequential timeouts could stretch a cycle to ~2 minutes without ever triggering backoff).
+- **Timeout alignment** — per-step timeouts are derived from `PW_TIMEOUT + 2s` so pypowerwall's internal timeout fires first; abandoned executor threads were holding the library's per-function API lock and starving the worker pool. `pwcacheexpire` is now passed to pypowerwall (matching the poll interval) so its internal cache doesn't expire mid-cycle.
+- **MQTT publish coalescing** — at most one in-flight publish task per gateway (latest-wins) with strong task references; slow brokers previously accumulated unbounded fire-and-forget tasks that were also eligible for garbage collection mid-publish.
+- **WebSocket serialize-once** — streamed payloads are serialized at most once per second and shared across all connected clients (previously each client re-serialized the full multi-hundred-KB snapshot every second).
+- **Non-blocking startup** — the hybrid cloud-control connection is established in a background task instead of blocking server startup for up to 15 seconds.
+
+**Added:**
+- **`PW_CONFIG` / `--config` file loading implemented** — the documented YAML/JSON configuration file (server section + gateways list) is now actually read, with per-entry validation. Previously the flag and README section existed but no code consumed the file. `pyyaml` added as an explicit dependency.
+
+**Changed:**
+- README and docker-compose now document the real control variable (`PW_CONTROL_SECRET`); the previously documented `CONTROL_ENABLED`/`CONTROL_TOKEN` variables were never read by the code.
+
 ### [0.3.7] - 2026-06-28
 
 **Added:**

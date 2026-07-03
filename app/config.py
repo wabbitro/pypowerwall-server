@@ -170,25 +170,31 @@ import json
 import logging
 import os
 from typing import List, Optional
-from pydantic import Field
+from pydantic import BaseModel, Field, model_validator
 from pydantic_settings import BaseSettings
 
 logger = logging.getLogger(__name__)
 
 # Server version
-SERVER_VERSION = "0.3.7"
+SERVER_VERSION = "0.4.0"
 
 
-class GatewayConfig(BaseSettings):
+class GatewayConfig(BaseModel):
     """Configuration for a single Powerwall gateway.
 
     Auth modes:
     - TEDAPI: host + gw_pwd (local gateway access via 192.168.91.1)
     - Cloud: email + authpath (uses .pypowerwall.auth and .pypowerwall.site files)
+
+    NOTE: Deliberately a plain BaseModel, not BaseSettings — it is only ever
+    constructed from explicit kwargs / PW_GATEWAYS JSON.  As a BaseSettings
+    with an empty env_prefix, generic environment variables (PORT, EMAIL,
+    NAME, HOST — ubiquitous on container platforms) silently populated any
+    field not passed explicitly.
     """
 
     id: str
-    name: str
+    name: Optional[str] = None  # Defaults to id when omitted
     host: Optional[str] = None
     port: Optional[int] = Field(default=None, ge=1, le=65535)  # Non-standard HTTPS port (e.g. 8443 via travel router)
     gw_pwd: Optional[str] = None  # Gateway Wi-Fi password for TEDAPI mode
@@ -203,7 +209,11 @@ class GatewayConfig(BaseSettings):
     fleetapi: bool = False
     type: str = "powerwall"  # "powerwall" | "inverter" (solar-only, no batteries)
 
-    model_config = {"env_prefix": ""}
+    @model_validator(mode="after")
+    def _default_name_to_id(self):
+        if not self.name:
+            self.name = self.id
+        return self
 
 
 class Settings(BaseSettings):
@@ -316,17 +326,133 @@ class Settings(BaseSettings):
                 self.cache_file = "/tmp/.powerwall"
         self._initialize_gateways()
 
+    def _load_config_file(self) -> bool:
+        """Load gateway (and optional server) config from a PW_CONFIG file.
+
+        Supports the YAML format documented in the README (JSON works too —
+        it is a subset of YAML).  Expected structure:
+
+            server:            # optional
+              host: 0.0.0.0
+              port: 8675
+              cors_origins: [...]
+            gateways:
+              - id: home
+                host: 192.168.91.1
+                gw_pwd: ...
+
+        Returns True when PW_CONFIG is set (the file takes precedence over
+        PW_GATEWAYS / legacy env config, even if it fails to parse — a broken
+        file must not silently reconfigure the server to a different mode).
+        """
+        config_path = os.getenv("PW_CONFIG")
+        if not config_path:
+            return False
+
+        self.gateways = []
+        try:
+            import yaml
+
+            with open(config_path) as f:
+                doc = yaml.safe_load(f)
+        except Exception as e:
+            logger.error(
+                f"Failed to read PW_CONFIG file {config_path}: {e} - "
+                "no gateways configured"
+            )
+            return True
+
+        if not isinstance(doc, dict):
+            logger.error(
+                f"PW_CONFIG file {config_path} must contain a mapping with a "
+                "'gateways' list - no gateways configured"
+            )
+            return True
+
+        server = doc.get("server")
+        if isinstance(server, dict):
+            # Parse defensively: a malformed value (e.g. port: "eight")
+            # should log an error and keep the default, not crash startup.
+            if "host" in server:
+                self.server_host = str(server["host"])
+            if "port" in server:
+                try:
+                    port = int(server["port"])
+                    if not 1 <= port <= 65535:
+                        raise ValueError(f"port out of range: {port}")
+                    self.server_port = port
+                except (TypeError, ValueError) as e:
+                    logger.error(
+                        f"Invalid server.port in {config_path} ({e}) - "
+                        f"keeping {self.server_port}"
+                    )
+            if isinstance(server.get("cors_origins"), list):
+                self.cors_origins = [str(o) for o in server["cors_origins"]]
+
+        entries = doc.get("gateways")
+        if not isinstance(entries, list):
+            logger.error(
+                f"PW_CONFIG file {config_path} has no 'gateways' list - "
+                "no gateways configured"
+            )
+            return True
+
+        for idx, gw in enumerate(entries):
+            try:
+                self.gateways.append(GatewayConfig(**gw))
+            except Exception as e:
+                logger.error(
+                    f"Skipping invalid gateway entry {idx} in {config_path} "
+                    f"(id={gw.get('id', '?') if isinstance(gw, dict) else '?'}): {e}"
+                )
+        if not self.gateways:
+            logger.error(
+                f"PW_CONFIG file {config_path} contained no valid gateway entries"
+            )
+        return True
+
     def _initialize_gateways(self):
-        """Initialize gateway configurations from environment variables."""
+        """Initialize gateway configurations from PW_CONFIG file or environment variables."""
+        # Config file (--config / PW_CONFIG) takes precedence
+        if self._load_config_file():
+            return
+
         # Try to load from PW_GATEWAYS JSON
         gateways_json = os.getenv("PW_GATEWAYS")
         if gateways_json:
+            # When PW_GATEWAYS is set, never silently fall back to legacy
+            # single-gateway mode: a typo in a 5-gateway config used to
+            # discard the whole list and quietly reconfigure the server.
+            # Validate each entry individually so one bad entry doesn't
+            # take out the rest.
+            self.gateways = []
             try:
                 gateways_data = json.loads(gateways_json)
-                self.gateways = [GatewayConfig(**gw) for gw in gateways_data]
-                return
             except Exception as e:
-                logger.error(f"Error parsing PW_GATEWAYS: {e}")
+                logger.error(
+                    f"PW_GATEWAYS is not valid JSON ({e}) - "
+                    "no gateways configured"
+                )
+                return
+            if not isinstance(gateways_data, list):
+                logger.error(
+                    "PW_GATEWAYS must be a JSON array of gateway objects - "
+                    "no gateways configured"
+                )
+                return
+            for idx, gw in enumerate(gateways_data):
+                try:
+                    self.gateways.append(GatewayConfig(**gw))
+                except Exception as e:
+                    logger.error(
+                        f"Skipping invalid PW_GATEWAYS entry {idx} "
+                        f"(id={gw.get('id', '?') if isinstance(gw, dict) else '?'}): {e}"
+                    )
+            if not self.gateways:
+                logger.error(
+                    "PW_GATEWAYS was set but contained no valid gateway entries"
+                )
+            return
 
         # Fall back to single gateway mode (legacy compatibility)
         if self.pw_host or self.pw_email:

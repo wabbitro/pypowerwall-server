@@ -7,20 +7,34 @@ from app.core.gateway_manager import gateway_manager
 from app.core.scaling import raw_to_tesla_battery_percent
 
 
+def _reset_singleton_state():
+    """Clear ALL mutable state on the gateway_manager singleton.
+
+    Task references from a previous test belong to that test's (closed)
+    event loop, and backoff/poll bookkeeping bleeds between tests unless
+    cleared here.
+    """
+    gateway_manager.gateways.clear()
+    gateway_manager.connections.clear()
+    gateway_manager.cache.clear()
+    gateway_manager._cloud_control = None
+    gateway_manager._cloud_control_task = None
+    gateway_manager._executor = None
+    gateway_manager._poll_tasks.clear()
+    gateway_manager._mqtt_tasks.clear()
+    gateway_manager._consecutive_failures.clear()
+    gateway_manager._next_poll_time.clear()
+    gateway_manager._pending_configs.clear()
+    gateway_manager._last_successful_data.clear()
+    gateway_manager._preserve_stale_count.clear()
+
+
 @pytest.fixture(autouse=True)
 def reset_gateway_manager():
     """Reset gateway manager before each test."""
-    gateway_manager.gateways.clear()
-    gateway_manager.connections.clear()
-    gateway_manager.cache.clear()
-    gateway_manager._cloud_control = None
-    gateway_manager._executor = None
+    _reset_singleton_state()
     yield
-    gateway_manager.gateways.clear()
-    gateway_manager.connections.clear()
-    gateway_manager.cache.clear()
-    gateway_manager._cloud_control = None
-    gateway_manager._executor = None
+    _reset_singleton_state()
 
 
 @pytest.fixture

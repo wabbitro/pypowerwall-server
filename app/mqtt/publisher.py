@@ -60,7 +60,7 @@ import asyncio
 import json
 import logging
 import ssl
-from typing import Optional, Set
+from typing import List, Optional, Set
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +100,25 @@ class MqttPublisher:
             self._connection_loop(), name="mqtt-connection"
         )
         logger.info("MQTT publisher starting...")
+
+    async def publish_offline(self, gateway_ids: List[str]) -> None:
+        """Mark per-gateway availability topics offline (used at shutdown).
+
+        The broker LWT only covers the global availability topic; without
+        this, per-gateway topics stay 'online' after a clean shutdown and HA
+        keeps showing stale retained sensor values as live.
+        """
+        if not self.enabled or not self._connected or self._client is None:
+            return
+        from app.config import settings  # late import
+
+        for gateway_id in gateway_ids:
+            await self._safe_publish(
+                f"{settings.mqtt_topic_prefix}/{gateway_id}/availability",
+                "offline",
+                settings.mqtt_retain,
+                settings.mqtt_qos,
+            )
 
     async def stop(self) -> None:
         """Gracefully stop the publisher.  Called from main.py lifespan shutdown."""
@@ -359,9 +378,14 @@ class MqttPublisher:
                     f"{prefix}/status", json.dumps(summary), retain, qos
                 )
 
-            # Mark availability as online
+            # Per-gateway availability must track the actual gateway state.
+            # Discovery uses availability_mode "all", so if this topic never
+            # goes "offline" HA keeps showing stale retained sensor values
+            # after the gateway drops (the LWT only covers the global topic).
             await self._safe_publish(
-                f"{prefix}/availability", "online", retain, qos
+                f"{prefix}/availability",
+                "online" if status.online else "offline",
+                retain, qos,
             )
 
         except Exception as e:

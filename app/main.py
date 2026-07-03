@@ -148,10 +148,13 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # Shutdown
+    # Shutdown.  Order matters: stop polling first (so nothing new is
+    # scheduled), then flush per-gateway offline states while the MQTT
+    # connection is still alive, then disconnect from the broker.
     logger.info("Shutting down PyPowerwall Server...")
-    await mqtt_publisher.stop()
     await gateway_manager.shutdown()
+    await mqtt_publisher.publish_offline(list(gateway_manager.gateways))
+    await mqtt_publisher.stop()
 
 
 # Normalize PROXY_BASE_URL: strip trailing slash, keep leading slash (or empty string)
@@ -185,22 +188,21 @@ app = FastAPI(
 )
 
 # Configure CORS.
-# The CORS spec forbids allow_credentials=True combined with allow_origins=["*"].
-# However, the powerflow app.js runs in iframes on different origins and sends
-# cookies (AuthCookie/UserRecord injected by track_requests), making every request
-# credentialed.  Credentialed requests require the exact origin reflected back —
-# not a wildcard — plus Access-Control-Allow-Credentials: true.
+# The CORS spec forbids allow_credentials=True combined with allow_origins=["*"]
+# because reflecting any origin WITH credentials lets every website a user
+# visits make credentialed requests here and read the responses.  So:
 #
-# Solution: when CORS_ORIGINS is the default wildcard, use allow_origin_regex=".*"
-# instead.  Starlette then reflects the actual request Origin and sets credentials,
-# satisfying the browser for both plain and credentialed cross-origin requests.
-# When specific origins are configured via CORS_ORIGINS, use those directly.
+# - Wildcard (default): plain "*" with allow_credentials=False.  The vendored
+#   powerflow app.js is patched to credentials: "same-origin" and uses relative
+#   URLs, so same-origin embedding (and its AuthCookie compat cookies) does not
+#   depend on CORS credentials at all.
+# - Explicit CORS_ORIGINS list: those origins with credentials allowed, for
+#   deployments that genuinely need credentialed cross-origin access.
 _cors_wildcard = "*" in settings.cors_origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[] if _cors_wildcard else settings.cors_origins,
-    allow_origin_regex=".*" if _cors_wildcard else None,
-    allow_credentials=True,
+    allow_origins=["*"] if _cors_wildcard else settings.cors_origins,
+    allow_credentials=not _cors_wildcard,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -676,7 +678,7 @@ def cli():
         pypowerwall-server
         pypowerwall-server --host 192.168.91.1 --gw-pwd mypassword
         pypowerwall-server --port 8080 --debug
-        pypowerwall-server --config /path/to/config.json
+        pypowerwall-server --config /path/to/gateways.yaml
     """
     import argparse
     import sys
@@ -698,7 +700,7 @@ Environment Variables:
   PW_DEBUG           Enable debug logging (default: false)
   PW_PORT            Server port (default: 8675)
   PW_BIND_ADDRESS    Server bind address (default: 0.0.0.0)
-  PW_CONFIG          Path to JSON configuration file
+  PW_CONFIG          Path to YAML/JSON configuration file
   
 For more information, visit: https://github.com/jasonacox/pypowerwall-server
         """,
@@ -726,7 +728,7 @@ For more information, visit: https://github.com/jasonacox/pypowerwall-server
         help="Server bind address (default: 0.0.0.0)",
     )
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
-    parser.add_argument("--config", help="Path to JSON configuration file")
+    parser.add_argument("--config", help="Path to YAML/JSON configuration file")
     parser.add_argument(
         "--reload", action="store_true", help="Enable auto-reload for development"
     )
