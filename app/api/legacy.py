@@ -656,8 +656,10 @@ async def get_tedapi_config():
     gateway_id = get_default_gateway()
     status = gateway_manager.get_gateway(gateway_id)
 
-    # Fast fail if no connection
-    if not status or not status.online:
+    # Fast fail only if the gateway is unknown entirely — call_tedapi() itself
+    # already gates on online/fallback-viable state, so don't duplicate (and
+    # thereby bypass) that check here.
+    if not status:
         return {"error": "Gateway offline - TEDAPI unavailable"}
 
     config = await gateway_manager.call_tedapi(gateway_id, "get_config", timeout=5.0)
@@ -675,8 +677,10 @@ async def get_tedapi_status():
     gateway_id = get_default_gateway()
     status = gateway_manager.get_gateway(gateway_id)
 
-    # Fast fail if no connection
-    if not status or not status.online:
+    # Fast fail only if the gateway is unknown entirely — call_tedapi() itself
+    # already gates on online/fallback-viable state, so don't duplicate (and
+    # thereby bypass) that check here.
+    if not status:
         return {"error": "Gateway offline - TEDAPI unavailable"}
 
     result = await gateway_manager.call_tedapi(gateway_id, "get_status", timeout=5.0)
@@ -694,8 +698,10 @@ async def get_tedapi_components():
     gateway_id = get_default_gateway()
     status = gateway_manager.get_gateway(gateway_id)
 
-    # Fast fail if no connection
-    if not status or not status.online:
+    # Fast fail only if the gateway is unknown entirely — call_tedapi() itself
+    # already gates on online/fallback-viable state, so don't duplicate (and
+    # thereby bypass) that check here.
+    if not status:
         return {"error": "Gateway offline - TEDAPI unavailable"}
 
     components = await gateway_manager.call_tedapi(
@@ -715,8 +721,10 @@ async def get_tedapi_battery():
     gateway_id = get_default_gateway()
     status = gateway_manager.get_gateway(gateway_id)
 
-    # Fast fail if no connection
-    if not status or not status.online:
+    # Fast fail only if the gateway is unknown entirely — call_tedapi() itself
+    # already gates on online/fallback-viable state, so don't duplicate (and
+    # thereby bypass) that check here.
+    if not status:
         return {"error": "Gateway offline - TEDAPI unavailable"}
 
     battery = await gateway_manager.call_tedapi(
@@ -736,8 +744,10 @@ async def get_tedapi_controller():
     gateway_id = get_default_gateway()
     status = gateway_manager.get_gateway(gateway_id)
 
-    # Fast fail if no connection
-    if not status or not status.online:
+    # Fast fail only if the gateway is unknown entirely — call_tedapi() itself
+    # already gates on online/fallback-viable state, so don't duplicate (and
+    # thereby bypass) that check here.
+    if not status:
         return {"error": "Gateway offline - TEDAPI unavailable"}
 
     controller = await gateway_manager.call_tedapi(

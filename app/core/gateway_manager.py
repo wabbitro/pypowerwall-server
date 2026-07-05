@@ -337,6 +337,7 @@ class GatewayManager:
                     rsa_key_path=config.rsa_key_path,
                     rsa_key_configured=bool(config.rsa_key_path),
                     wifi_host=config.wifi_host,
+                    v1r_fallback_host=config.v1r_fallback_host,
                     email=config.email,
                     timezone=config.timezone,
                     cloud_mode=config.cloud_mode,
@@ -871,6 +872,9 @@ class GatewayManager:
                             )
 
                     self.connections[gateway_id] = pw
+                    if config.v1r_fallback_host:
+                        from app.core.failover_tedapi import wrap_gateway
+                        wrap_gateway(pw, config.v1r_fallback_host)
                     del self._pending_configs[gateway_id]
 
                     # Try to get site_id for cloud mode gateways
@@ -955,6 +959,19 @@ class GatewayManager:
             gateway.online = True
             gateway.last_error = None
 
+            # Reset failover state on successful poll
+            if pw and hasattr(pw, "tedapi") and pw.tedapi:
+                tedapi = pw.tedapi
+                if getattr(tedapi, "v1r_fallback_host", None):
+                    if getattr(tedapi, "lan_failed", False):
+                        logger.info(
+                            f"Poller detected primary recovered for {gateway_id} — "
+                            f"resuming primary path on TEDAPI client"
+                        )
+                        tedapi.lan_failed = False
+                        tedapi.lan_fail_count = 0
+                        tedapi.lan_recover_after = 0
+
             # Reset backoff on success
             previous_failures = self._consecutive_failures.get(gateway_id, 0)
             self._consecutive_failures[gateway_id] = 0
@@ -1017,6 +1034,23 @@ class GatewayManager:
 
             gateway.online = False
             gateway.last_error = str(e)
+
+            # If this is a failover-capable gateway, propagate the failure to the TEDAPI instance immediately.
+            # This ensures that subsequent call_api/call_tedapi calls skip primary probes and go straight to fallback.
+            pw = self.connections.get(gateway_id)
+            if pw and hasattr(pw, "tedapi") and pw.tedapi:
+                tedapi = pw.tedapi
+                if getattr(tedapi, "v1r_fallback_host", None):
+                    if not getattr(tedapi, "lan_failed", False):
+                        logger.warning(
+                            f"Poller detected primary down for {gateway_id} — "
+                            f"flagging LAN failed on TEDAPI client to trigger fast failover"
+                        )
+                        tedapi.lan_failed = True
+                        if not getattr(tedapi, "lan_fail_count", 0):
+                            tedapi.lan_fail_count = 3
+                        import time
+                        tedapi.lan_recover_after = time.time() + 60
 
             self.cache[gateway_id] = GatewayStatus(
                 gateway=gateway, online=False, error=str(e), last_updated=now
@@ -1169,15 +1203,27 @@ class GatewayManager:
         if fail_if_offline:
             status = self.cache.get(gateway_id)
             if status and not status.online:
-                logger.debug(
-                    f"[{gateway_id}] call_api({method}) fast-fail: gateway offline"
-                )
-                return None
+                is_viable = False
+                pw = self.connections.get(gateway_id)
+                if pw and hasattr(pw, "tedapi") and pw.tedapi:
+                    if hasattr(pw.tedapi, "is_fallback_viable") and pw.tedapi.is_fallback_viable():
+                        is_viable = True
+                if not is_viable:
+                    logger.debug(
+                        f"[{gateway_id}] call_api({method}) fast-fail: gateway offline"
+                    )
+                    return None
 
         pw = self.connections.get(gateway_id)
         if not pw:
             logger.warning(f"[{gateway_id}] call_api({method}): no connection object")
             return None
+
+        # Raise timeout for write methods if fallback host is configured
+        if method in _WRITE_METHODS:
+            config = self.gateways.get(gateway_id)
+            if config and config.v1r_fallback_host:
+                timeout = max(timeout, 30.0)
 
         try:
             method_func = getattr(pw, method)
@@ -1290,10 +1336,16 @@ class GatewayManager:
         if fail_if_offline:
             status = self.cache.get(gateway_id)
             if status and not status.online:
-                logger.debug(
-                    f"[{gateway_id}] call_tedapi({method}) fast-fail: gateway offline"
-                )
-                return None
+                is_viable = False
+                pw = self.connections.get(gateway_id)
+                if pw and hasattr(pw, "tedapi") and pw.tedapi:
+                    if hasattr(pw.tedapi, "is_fallback_viable") and pw.tedapi.is_fallback_viable():
+                        is_viable = True
+                if not is_viable:
+                    logger.debug(
+                        f"[{gateway_id}] call_tedapi({method}) fast-fail: gateway offline"
+                    )
+                    return None
 
         pw = self.connections.get(gateway_id)
         if not pw or not hasattr(pw, "tedapi") or not pw.tedapi:

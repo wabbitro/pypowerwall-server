@@ -200,6 +200,7 @@ class GatewayConfig(BaseModel):
     gw_pwd: Optional[str] = None  # Gateway Wi-Fi password for TEDAPI mode
     rsa_key_path: Optional[str] = None  # Path to RSA-4096 private key PEM for v1r LAN TEDAPI access
     wifi_host: Optional[str] = None  # WiFi host IP for TEDAPI v1r WiFi fallback
+    v1r_fallback_host: Optional[str] = None  # WiFi fallback host IP for v1r write failover
     email: Optional[str] = None
     authpath: Optional[
         str
@@ -274,6 +275,9 @@ class Settings(BaseSettings):
     pw_wifi_host: Optional[str] = Field(
         default=None, alias="PW_WIFI_HOST"
     )  # WiFi host IP for TEDAPI v1r WiFi fallback
+    pw_v1r_fallback_host: Optional[str] = Field(
+        default=None, alias="PW_V1R_FALLBACK_HOST"
+    )  # WiFi fallback host IP for v1r write failover
     neg_solar: bool = Field(
         default=False, alias="PW_NEG_SOLAR"
     )  # Allow negative solar values (default: no)
@@ -464,6 +468,7 @@ class Settings(BaseSettings):
                     gw_pwd=self.pw_gw_pwd,
                     rsa_key_path=self.pw_rsa_key_path,
                     wifi_host=self.pw_wifi_host,
+                    v1r_fallback_host=self.pw_v1r_fallback_host,
                     email=self.pw_email,
                     authpath=self.pw_authpath,
                     timezone=self.pw_timezone,

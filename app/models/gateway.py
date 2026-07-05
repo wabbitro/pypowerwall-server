@@ -47,6 +47,7 @@ class Gateway(BaseModel):
     rsa_key_path: Optional[str] = Field(default=None, exclude=True)  # RSA-4096 private key PEM path (internal only; not serialized in API responses)
     rsa_key_configured: bool = False
     wifi_host: Optional[str] = None  # True when rsa_key_path is set; safe to expose in API responses
+    v1r_fallback_host: Optional[str] = None  # WiFi fallback host IP for v1r write failover
     email: Optional[str] = Field(default=None, exclude=True)  # Tesla account email (internal only; never serialized in API responses)
     site_id: Optional[str] = None  # Tesla Site ID (populated after connection)
     timezone: str = "America/Los_Angeles"
