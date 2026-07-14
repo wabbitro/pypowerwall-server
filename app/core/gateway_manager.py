@@ -855,26 +855,118 @@ class GatewayManager:
                             tedapi_kwargs["rsa_key_path"] = config.rsa_key_path
                         if config.wifi_host:
                             tedapi_kwargs["wifi_host"] = config.wifi_host
-                        pw = await asyncio.wait_for(
-                            loop.run_in_executor(
-                                self._executor,
-                                lambda kw=tedapi_kwargs: pypowerwall.Powerwall(**kw),
-                            ),
-                            timeout=15.0,
-                        )
-                        connected = await asyncio.wait_for(
-                            loop.run_in_executor(self._executor, pw.is_connected),
-                            timeout=10.0,
-                        )
+
+                        # Do not pass v1r_fallback_host as wifi_host: they are
+                        # separate mechanisms with different upstream auth
+                        # semantics. The project failover wrapper consumes it.
+                        primary_construction_failed = False
+                        try:
+                            pw = await asyncio.wait_for(
+                                loop.run_in_executor(
+                                    self._executor,
+                                    lambda kw=tedapi_kwargs: pypowerwall.Powerwall(**kw),
+                                ),
+                                timeout=15.0,
+                            )
+                        except Exception as primary_error:
+                            if not config.v1r_fallback_host:
+                                raise
+
+                            # A constructor failure leaves no primary object to
+                            # wrap. Bootstrap a temporary local TEDAPI client
+                            # through the RSA-v1r fallback, then restore its
+                            # primary transport below for recovery probes.
+                            logger.warning(
+                                f"Primary TEDAPI construction failed for gateway {gateway_id}: "
+                                f"{primary_error}; attempting v1r fallback bootstrap"
+                            )
+                            fallback_kwargs = dict(tedapi_kwargs)
+                            fallback_kwargs["host"] = config.v1r_fallback_host
+                            pw = await asyncio.wait_for(
+                                loop.run_in_executor(
+                                    self._executor,
+                                    lambda kw=fallback_kwargs: pypowerwall.Powerwall(**kw),
+                                ),
+                                timeout=15.0,
+                            )
+                            primary_construction_failed = True
+
+                        fallback_bootstrapped = False
+                        if config.v1r_fallback_host:
+                            from app.core.failover_tedapi import wrap_gateway
+
+                            wrap_gateway(pw, config.v1r_fallback_host)
+                            tedapi = getattr(pw, "tedapi", None)
+                            if not tedapi:
+                                raise Exception(
+                                    "pypowerwall connection has no TEDAPI client to wrap"
+                                )
+
+                            if primary_construction_failed:
+                                # The temporary Powerwall was made against the
+                                # fallback so its existing transport is already
+                                # authenticated there. Preserve it as the
+                                # failover transport, then make the normal
+                                # transport point back to the wired primary.
+                                # FailoverTEDAPI.get_config()/get_din() will
+                                # therefore probe the primary on their normal
+                                # recovery schedule while serving this bootstrap
+                                # from the authenticated fallback transport.
+                                from pypowerwall.tedapi.tedapi_v1r import TEDAPIv1r
+
+                                fallback_transport = tedapi.v1r_transport
+                                tedapi._fallback_transport = fallback_transport
+                                tedapi.v1r_transport = TEDAPIv1r(
+                                    host=effective_host,
+                                    password=fallback_transport.password,
+                                    rsa_key_path=config.rsa_key_path,
+                                    timeout=fallback_transport.timeout,
+                                    poolmaxsize=fallback_transport.poolmaxsize,
+                                )
+                                tedapi.gw_ip = effective_host
+
+                            # The fallback-constructed object was deliberately
+                            # rebound to the unavailable primary above, so do
+                            # not call pw.is_connected() in that case: doing so
+                            # would immediately repeat the long primary login
+                            # that this branch exists to avoid. Go directly to
+                            # FailoverTEDAPI.connect() below instead.
+                            if primary_construction_failed:
+                                connected = False
+                            else:
+                                connected = await asyncio.wait_for(
+                                    loop.run_in_executor(self._executor, pw.is_connected),
+                                    timeout=10.0,
+                                )
+                            if not connected:
+                                # Reuse FailoverTEDAPI.connect() rather than
+                                # duplicating its fallback DIN bootstrap. The
+                                # initial state is the same as its existing
+                                # bootstrap blocks: degraded immediately, three
+                                # primary failures recorded, and a 60s recovery
+                                # probe delay.
+                                import time
+
+                                tedapi.lan_failed = True
+                                tedapi.lan_fail_count = 3
+                                tedapi.lan_recover_after = time.time() + 60
+                                connected = await asyncio.wait_for(
+                                    loop.run_in_executor(self._executor, tedapi.connect),
+                                    timeout=10.0,
+                                )
+                                fallback_bootstrapped = bool(connected)
+                        else:
+                            connected = await asyncio.wait_for(
+                                loop.run_in_executor(self._executor, pw.is_connected),
+                                timeout=10.0,
+                            )
+
                         if not connected:
                             raise Exception(
                                 f"pypowerwall failed to connect to gateway {gateway_id} (TEDAPI mode)"
                             )
 
                     self.connections[gateway_id] = pw
-                    if config.v1r_fallback_host:
-                        from app.core.failover_tedapi import wrap_gateway
-                        wrap_gateway(pw, config.v1r_fallback_host)
                     del self._pending_configs[gateway_id]
 
                     # Try to get site_id for cloud mode gateways
@@ -883,7 +975,9 @@ class GatewayManager:
                         mode_label = "FleetAPI"
                     elif gateway.cloud_mode:
                         mode_label = "Cloud"
-                    elif config.rsa_key_path and config.wifi_host:
+                    elif config.rsa_key_path and (
+                        config.wifi_host or config.v1r_fallback_host
+                    ):
                         mode_label = "TEDAPI v1r + WiFi"
                     elif config.rsa_key_path:
                         mode_label = "TEDAPI v1r"
@@ -909,8 +1003,14 @@ class GatewayManager:
                                 f"Connected to gateway {gateway_id} - {mode_label} mode"
                             )
                     else:
+                        connection_path = (
+                            " via v1r fallback bootstrap"
+                            if fallback_bootstrapped
+                            else ""
+                        )
                         logger.info(
-                            f"Connected to gateway {gateway_id} - {mode_label} mode ({gateway.host})"
+                            f"Connected to gateway {gateway_id} - {mode_label} mode "
+                            f"({gateway.host}){connection_path}"
                         )
 
                 except asyncio.TimeoutError:
